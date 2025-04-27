@@ -29,13 +29,178 @@ const SOURCE_WEIGHTS = {
   'Alphaliner': 1.0,
 };
 
+// Функция для получения актуальных данных SCFI для конкретного маршрута
+async function getUpdatedSCFIDataForRoute(origin, destination) {
+  try {
+    console.log(`Getting updated SCFI data for route: ${origin} to ${destination}`);
+    
+    // Получение актуальных данных композитного индекса SCFI
+    const scfiCompositeData = await scfiScraper.getSCFIDataForCalculation();
+    
+    if (!scfiCompositeData || !scfiCompositeData.current_index) {
+      console.log('Failed to get SCFI composite data, falling back to route-specific data');
+      return scfiScraper.getSCFIDataForRoute(origin, destination);
+    }
+    
+    // Получение данных для конкретного маршрута
+    const routeData = await scfiScraper.getSCFIDataForRoute(origin, destination);
+    
+    // Если данные для маршрута получены успешно, используем их
+    if (routeData && routeData.current_index) {
+      console.log('Using route-specific SCFI data:', routeData);
+      return routeData;
+    }
+    
+    // Если данные для маршрута не получены, используем композитный индекс
+    // с корректировкой на основе региона
+    console.log('No route-specific data available, using adjusted composite index');
+    
+    // Определение регионов для портов
+    const originRegion = await getPortRegionById(origin);
+    const destinationRegion = await getPortRegionById(destination);
+    
+    // Коэффициенты корректировки для разных регионов
+    const regionAdjustments = {
+      'Europe': 1.05,
+      'Mediterranean': 1.0,
+      'North America': 1.15,
+      'Middle East': 0.95,
+      'Oceania': 0.9,
+      'Africa': 1.0,
+      'South America': 0.95,
+      'Asia': 0.85
+    };
+    
+    // Определение коэффициента корректировки
+    let adjustmentFactor = 1.0;
+    
+    if (originRegion === 'Asia' || originRegion === 'China') {
+      adjustmentFactor = regionAdjustments[destinationRegion] || 1.0;
+    }
+    
+    // Применение коэффициента к композитному индексу
+    const adjustedIndex = Math.round(scfiCompositeData.current_index * adjustmentFactor);
+    
+    // Создание объекта с данными для маршрута на основе композитного индекса
+    const adjustedData = {
+      route: `${originRegion} to ${destinationRegion}`,
+      current_index: adjustedIndex,
+      change: scfiCompositeData.change,
+      index_date: scfiCompositeData.index_date
+    };
+    
+    console.log('Created adjusted SCFI data:', adjustedData);
+    return adjustedData;
+  } catch (error) {
+    console.error('Error getting updated SCFI data for route:', error);
+    // В случае ошибки возвращаем null, чтобы калькулятор мог использовать другие источники
+    return null;
+  }
+}
+
+// Вспомогательная функция для определения региона порта по его ID
+async function getPortRegionById(portId) {
+  try {
+    const query = `
+      SELECT region FROM ports 
+      WHERE port_id = $1
+    `;
+    
+    const result = await pool.query(query, [portId]);
+    
+    if (result.rows.length > 0) {
+      return result.rows[0].region;
+    } else {
+      // Если порт не найден в базе, используем маппинг на основе кода порта
+      const regionMap = {
+        // Азия
+        'CNSHA': 'China',
+        'CNYTN': 'China',
+        'CNNGB': 'China',
+        'CNQIN': 'China',
+        'CNDAL': 'China',
+        'HKHKG': 'Asia',
+        'SGSIN': 'Asia',
+        'JPOSA': 'Asia',
+        'JPTYO': 'Asia',
+        'KRPUS': 'Asia',
+        'VNSGN': 'Asia',
+        'MYLPK': 'Asia',
+        'IDTPP': 'Asia',
+        'THBKK': 'Asia',
+        'PHMNL': 'Asia',
+        
+        // Европа
+        'DEHAM': 'Europe',
+        'NLRTM': 'Europe',
+        'GBFXT': 'Europe',
+        'FRLEH': 'Europe',
+        'BEANR': 'Europe',
+        'ESBCN': 'Europe',
+        'ITGOA': 'Europe',
+        'GRPIR': 'Europe',
+        
+        // Средиземноморье
+        'ITTRS': 'Mediterranean',
+        'ESVLC': 'Mediterranean',
+        'FRFOS': 'Mediterranean',
+        'TRMER': 'Mediterranean',
+        'EGPSD': 'Mediterranean',
+        
+        // Северная Америка
+        'USLAX': 'North America',
+        'USSEA': 'North America',
+        'USNYC': 'North America',
+        'USBAL': 'North America',
+        'USSAV': 'North America',
+        'USHOU': 'North America',
+        'CAMTR': 'North America',
+        'CAVNC': 'North America',
+        
+        // Ближний Восток
+        'AEJEA': 'Middle East',
+        'AEDXB': 'Middle East',
+        'SAJED': 'Middle East',
+        'IQBSR': 'Middle East',
+        'IRBND': 'Middle East',
+        
+        // Океания
+        'AUSYD': 'Oceania',
+        'AUMEL': 'Oceania',
+        'NZAKL': 'Oceania',
+        
+        // Африка
+        'ZALGS': 'Africa',
+        'ZADUR': 'Africa',
+        'MAPTM': 'Africa',
+        'EGALY': 'Africa',
+        'TZDAR': 'Africa',
+        'KEMBA': 'Africa',
+        
+        // Южная Америка
+        'BRSSZ': 'South America',
+        'ARBUE': 'South America',
+        'CLVAP': 'South America',
+        'PECLL': 'South America',
+        'COBUN': 'South America',
+        'ECGYE': 'South America'
+      };
+      
+      return regionMap[portId] || 'Unknown';
+    }
+  } catch (error) {
+    console.error('Error getting port region:', error);
+    return 'Unknown';
+  }
+}
+
 // Функция для расчета ставки фрахта на основе данных из различных источников
 async function calculateFreightRate(origin, destination, containerType, weight = 20000) {
   try {
     console.log(`Calculating freight rate for ${origin} to ${destination}, container type: ${containerType}, weight: ${weight}kg`);
     
-    // Получение данных из различных источников
-    const scfiData = await scfiScraper.getSCFIDataForRoute(origin, destination);
+    // Получение актуальных данных из различных источников
+    const scfiData = await getUpdatedSCFIDataForRoute(origin, destination);
     const fbxData = await fbxScraper.getFBXDataForRoute(origin, destination);
     const wciData = await wciScraper.getWCIDataForRoute(origin, destination);
     
