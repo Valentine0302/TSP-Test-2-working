@@ -56,8 +56,14 @@ async function fetchSCFIFromPrimarySource() {
     // Отправка запроса на сайт Shanghai Shipping Exchange
     const response = await axios.get(SCFI_URL, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0'
+      },
+      timeout: 10000
     });
     
     // Проверка успешности запроса
@@ -147,8 +153,14 @@ async function fetchSCFIFromAlternativeSource() {
     // Отправка запроса на альтернативный сайт
     const response = await axios.get(SCFI_ALT_URL, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0'
+      },
+      timeout: 10000
     });
     
     // Проверка успешности запроса
@@ -230,32 +242,36 @@ async function fetchMockSCFIData() {
     },
     {
       route: 'SCFI Europe/Mediterranean',
-      currentIndex: 2020,
-      change: 35,
+      currentIndex: 2100,
+      change: 30,
       indexDate: currentDate
     },
     {
-      route: 'SCFI North America West Coast',
-      currentIndex: 2250,
+      route: 'SCFI US West Coast',
+      currentIndex: 2300,
       change: 40,
       indexDate: currentDate
     },
     {
-      route: 'SCFI North America East Coast',
-      currentIndex: 2350,
+      route: 'SCFI US East Coast',
+      currentIndex: 2500,
       change: 45,
       indexDate: currentDate
     },
     {
       route: 'SCFI Southeast Asia',
-      currentIndex: 1750,
-      change: 15,
+      currentIndex: 1800,
+      change: 20,
       indexDate: currentDate
     }
   ];
   
   // Сохранение моковых данных в базу данных
-  await saveSCFIData(mockData);
+  try {
+    await saveSCFIData(mockData);
+  } catch (error) {
+    console.error('Error saving mock SCFI data to database:', error);
+  }
   
   return mockData;
 }
@@ -276,28 +292,69 @@ async function saveSCFIData(scfiData) {
         current_index NUMERIC NOT NULL,
         change NUMERIC,
         index_date DATE NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        UNIQUE(route, index_date)
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )
     `);
     
+    // Проверка наличия уникального ограничения
+    const constraintCheck = await client.query(`
+      SELECT COUNT(*) FROM pg_constraint 
+      WHERE conname = 'freight_indices_scfi_route_index_date_key'
+    `);
+    
+    // Если ограничение не существует, создаем его
+    if (constraintCheck.rows[0].count === '0') {
+      try {
+        await client.query(`
+          ALTER TABLE freight_indices_scfi 
+          ADD CONSTRAINT freight_indices_scfi_route_index_date_key 
+          UNIQUE (route, index_date)
+        `);
+      } catch (error) {
+        console.warn('Warning: Could not create unique constraint:', error.message);
+      }
+    }
+    
     // Вставка данных
     for (const data of scfiData) {
-      await client.query(
-        `INSERT INTO freight_indices_scfi 
-         (route, current_index, change, index_date) 
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (route, index_date) 
-         DO UPDATE SET 
-           current_index = $2,
-           change = $3`,
-        [
-          data.route,
-          data.currentIndex,
-          data.change,
-          data.indexDate
-        ]
-      );
+      try {
+        // Сначала проверяем, существует ли запись
+        const existingRecord = await client.query(
+          `SELECT id FROM freight_indices_scfi 
+           WHERE route = $1 AND index_date = $2`,
+          [data.route, data.indexDate]
+        );
+        
+        if (existingRecord.rows.length > 0) {
+          // Если запись существует, обновляем ее
+          await client.query(
+            `UPDATE freight_indices_scfi 
+             SET current_index = $1, change = $2
+             WHERE route = $3 AND index_date = $4`,
+            [
+              data.currentIndex,
+              data.change,
+              data.route,
+              data.indexDate
+            ]
+          );
+        } else {
+          // Если записи нет, вставляем новую
+          await client.query(
+            `INSERT INTO freight_indices_scfi 
+             (route, current_index, change, index_date) 
+             VALUES ($1, $2, $3, $4)`,
+            [
+              data.route,
+              data.currentIndex,
+              data.change,
+              data.indexDate
+            ]
+          );
+        }
+      } catch (error) {
+        console.error(`Error inserting/updating SCFI data for route ${data.route}:`, error);
+      }
     }
     
     // Завершение транзакции
@@ -335,13 +392,11 @@ async function getSCFIDataForCalculation() {
       const data = result.rows[0];
       console.log('Found SCFI data in database:', data);
       
+      // Возвращаем данные в формате, который ожидает сервер
       return {
-        index: 'SCFI',
-        value: data.current_index,
+        current_index: data.current_index,
         change: data.change,
-        date: data.index_date,
-        trend: data.change > 0 ? 'up' : 'down',
-        source: 'database'
+        index_date: data.index_date
       };
     }
     
@@ -356,13 +411,11 @@ async function getSCFIDataForCalculation() {
       if (compositeData) {
         console.log('Fetched SCFI data from API:', compositeData);
         
+        // Возвращаем данные в формате, который ожидает сервер
         return {
-          index: 'SCFI',
-          value: compositeData.currentIndex,
+          current_index: compositeData.currentIndex,
           change: compositeData.change,
-          date: compositeData.indexDate,
-          trend: compositeData.change > 0 ? 'up' : 'down',
-          source: 'api'
+          index_date: compositeData.indexDate
         };
       }
     } catch (error) {
@@ -372,24 +425,18 @@ async function getSCFIDataForCalculation() {
     // Если данные не удалось получить, возвращаем моковые данные
     console.log('Failed to get SCFI data, using mock data');
     return {
-      index: 'SCFI',
-      value: 1950,
+      current_index: 1950,
       change: 25,
-      date: new Date().toISOString().split('T')[0],
-      trend: 'up',
-      source: 'mock'
+      index_date: new Date().toISOString().split('T')[0]
     };
   } catch (error) {
     console.error('Error getting SCFI data for calculation:', error);
     
     // В случае ошибки возвращаем моковые данные
     return {
-      index: 'SCFI',
-      value: 1950,
+      current_index: 1950,
       change: 25,
-      date: new Date().toISOString().split('T')[0],
-      trend: 'up',
-      source: 'mock'
+      index_date: new Date().toISOString().split('T')[0]
     };
   }
 }
@@ -412,9 +459,9 @@ async function getSCFIDataForRoute(origin, destination) {
       routePatterns.push('%SCFI Mediterranean%');
     } else if (originRegion === 'Asia' && destinationRegion === 'North America') {
       if (isWestCoast(destination)) {
-        routePatterns.push('%SCFI North America West%');
+        routePatterns.push('%SCFI US West%');
       } else {
-        routePatterns.push('%SCFI North America East%');
+        routePatterns.push('%SCFI US East%');
       }
     } else if (originRegion === 'Asia' && destinationRegion === 'Asia') {
       routePatterns.push('%SCFI Southeast Asia%');
@@ -471,11 +518,11 @@ function isWestCoast(portId) {
   return westCoastPorts.includes(portId);
 }
 
-// Экспорт функций в формате CommonJS
+// Экспорт функций
 module.exports = {
   fetchSCFIData,
   getSCFIDataForRoute,
-  getSCFIDataForCalculation  // Добавляем функцию в экспорт
+  getSCFIDataForCalculation
 };
 
 // Специальный хак для совместимости с ES модулями в server.js
@@ -484,6 +531,6 @@ if (typeof exports === 'object' && typeof module !== 'undefined') {
   exports.default = {
     fetchSCFIData,
     getSCFIDataForRoute,
-    getSCFIDataForCalculation  // Добавляем функцию в экспорт по умолчанию
+    getSCFIDataForCalculation
   };
 }
