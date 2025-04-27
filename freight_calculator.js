@@ -1,6 +1,5 @@
 // Модуль для агрегации данных из различных источников и расчета ставок фрахта
 // Объединяет данные из SCFI, FBX, WCI и других источников
-
 const { Pool } = require('pg');
 const dotenv = require('dotenv');
 const scfiScraper = require('./scfi_scraper.js');
@@ -125,7 +124,6 @@ async function calculateFreightRate(origin, destination, containerType, weight =
     };
     
     console.log('Calculation result:', result);
-    
     return result;
   } catch (error) {
     console.error('Error calculating freight rate:', error);
@@ -179,46 +177,67 @@ function adjustRateByWeight(baseRate, weight, containerType) {
 
 // Функция для базового расчета ставки фрахта (используется, если нет данных из источников)
 function calculateBaseRate(origin, destination, containerType, weight = 20000) {
-  // Базовая ставка: случайное число от 1000 до 3000
-  const baseRate = Math.round(Math.random() * 2000 + 1000);
+  // Используем детерминированный подход вместо случайных чисел
+  // Создаем хеш на основе полных названий портов и типа контейнера
+  console.log(`Calculating base rate for ${origin} to ${destination}, container type: ${containerType}`);
+  
+  // Функция для создания простого хеша строки
+  function simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return Math.abs(hash);
+  }
+  
+  // Создаем строку для хеширования, включающую все параметры
+  const hashString = `${origin}-${destination}-${containerType}`;
+  const hash = simpleHash(hashString);
+  
+  // Базовая ставка: 1500 + хеш модуло 1500 (диапазон от 1500 до 3000)
+  const baseRate = 1500 + (hash % 1500);
+  
+  console.log(`Generated deterministic base rate for ${hashString}: ${baseRate}`);
   
   // Применение корректировки на основе веса
   const weightAdjustedRate = adjustRateByWeight(baseRate, weight, containerType);
   
-  // Минимальная ставка: 80% от базовой
-  const minRate = Math.round(weightAdjustedRate * 0.8);
-  
-  // Максимальная ставка: 120% от базовой
-  const maxRate = Math.round(weightAdjustedRate * 1.2);
-  
-  // Надежность: от 0.7 до 0.9
-  const reliability = Math.round((Math.random() * 0.2 + 0.7) * 100) / 100;
-  
-  // Количество источников: от 1 до 3
-  const sourceCount = Math.floor(Math.random() * 3) + 1;
-  
-  return {
+  // Формирование результата
+  const result = {
     rate: weightAdjustedRate,
-    minRate: minRate,
-    maxRate: maxRate,
-    reliability: reliability,
-    sourceCount: sourceCount,
+    minRate: Math.round(weightAdjustedRate * 0.9),  // -10%
+    maxRate: Math.round(weightAdjustedRate * 1.1),  // +10%
+    reliability: 0.7,  // Низкая надежность, так как используется базовый расчет
+    sourceCount: 0,
     sources: ['Base calculation'],
     finalRate: weightAdjustedRate // Добавляем для совместимости с API
   };
+  
+  console.log('Base calculation result:', result);
+  return result;
 }
 
 // Функция для расчета стандартного отклонения
 function calculateStandardDeviation(values) {
-  if (values.length <= 1) {
-    return 0;
-  }
+  const n = values.length;
+  if (n === 0) return 0;
   
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const squaredDifferences = values.map(value => Math.pow(value - mean, 2));
-  const variance = squaredDifferences.reduce((sum, value) => sum + value, 0) / (values.length - 1);
+  // Расчет среднего значения
+  const mean = values.reduce((sum, value) => sum + value, 0) / n;
   
-  return Math.sqrt(variance);
+  // Расчет суммы квадратов отклонений
+  const squaredDifferencesSum = values.reduce((sum, value) => {
+    const difference = value - mean;
+    return sum + (difference * difference);
+  }, 0);
+  
+  // Расчет дисперсии и стандартного отклонения
+  const variance = squaredDifferencesSum / n;
+  const stdDev = Math.sqrt(variance);
+  
+  return stdDev;
 }
 
 // Функция для обновления данных из всех источников
@@ -226,13 +245,13 @@ async function updateAllSourcesData() {
   try {
     console.log('Updating data from all sources...');
     
-    // Обновление данных из SCFI
+    // Обновление данных SCFI
     await scfiScraper.fetchSCFIData();
     
-    // Обновление данных из FBX
+    // Обновление данных FBX
     await fbxScraper.fetchFBXData();
     
-    // Обновление данных из WCI
+    // Обновление данных WCI
     await wciScraper.fetchWCIData();
     
     console.log('All sources data updated successfully');
