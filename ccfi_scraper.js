@@ -315,6 +315,85 @@ async function saveCCFIData(ccfiData) {
   }
 }
 
+// Функция для получения данных CCFI для расчета ставки фрахта
+async function getCCFIDataForCalculation() {
+  try {
+    console.log('Getting CCFI data for calculation...');
+    
+    // Получение последних данных композитного индекса CCFI из базы данных
+    const query = `
+      SELECT * FROM freight_indices_ccfi 
+      WHERE route = 'CCFI Composite Index'
+      ORDER BY index_date DESC 
+      LIMIT 1
+    `;
+    
+    const result = await pool.query(query);
+    
+    // Если данные найдены в базе, возвращаем их
+    if (result.rows.length > 0) {
+      const data = result.rows[0];
+      console.log('Found CCFI data in database:', data);
+      
+      return {
+        index: 'CCFI',
+        value: data.current_index,
+        change: data.change,
+        date: data.index_date,
+        trend: data.change > 0 ? 'up' : 'down',
+        source: 'database'
+      };
+    }
+    
+    // Если данных нет в базе, пытаемся получить их через API
+    console.log('No CCFI data in database, fetching from API...');
+    try {
+      const ccfiData = await fetchCCFIData();
+      
+      // Ищем композитный индекс в полученных данных
+      const compositeData = ccfiData.find(data => data.route.includes('Composite Index'));
+      
+      if (compositeData) {
+        console.log('Fetched CCFI data from API:', compositeData);
+        
+        return {
+          index: 'CCFI',
+          value: compositeData.currentIndex,
+          change: compositeData.change,
+          date: compositeData.indexDate,
+          trend: compositeData.change > 0 ? 'up' : 'down',
+          source: 'api'
+        };
+      }
+    } catch (error) {
+      console.error('Error fetching CCFI data from API:', error);
+    }
+    
+    // Если данные не удалось получить, возвращаем моковые данные
+    console.log('Failed to get CCFI data, using mock data');
+    return {
+      index: 'CCFI',
+      value: 1850,
+      change: 15,
+      date: new Date().toISOString().split('T')[0],
+      trend: 'up',
+      source: 'mock'
+    };
+  } catch (error) {
+    console.error('Error getting CCFI data for calculation:', error);
+    
+    // В случае ошибки возвращаем моковые данные
+    return {
+      index: 'CCFI',
+      value: 1850,
+      change: 15,
+      date: new Date().toISOString().split('T')[0],
+      trend: 'up',
+      source: 'mock'
+    };
+  }
+}
+
 // Функция для получения данных CCFI для конкретного маршрута
 async function getCCFIDataForRoute(origin, destination) {
   try {
@@ -395,5 +474,16 @@ function isWestCoast(portId) {
 // Экспорт функций
 module.exports = {
   fetchCCFIData,
-  getCCFIDataForRoute
+  getCCFIDataForRoute,
+  getCCFIDataForCalculation  // Добавляем функцию в экспорт
 };
+
+// Специальный хак для совместимости с ES модулями в server.js
+if (typeof exports === 'object' && typeof module !== 'undefined') {
+  Object.defineProperty(exports, '__esModule', { value: true });
+  exports.default = {
+    fetchCCFIData,
+    getCCFIDataForRoute,
+    getCCFIDataForCalculation  // Добавляем функцию в экспорт по умолчанию
+  };
+}
