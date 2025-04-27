@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSP Transport OÜ - Freight Rate Calculator</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="min-h-screen bg-gradient-to-b from-blue-50 to-white">
+    <div class="container mx-auto px-4 py-8">
+        <header class="mb-8 text-center">
+            <h1 class="text-3xl font-bold text-blue-800 mb-2">TSP Transport OÜ</h1>
+            <h2 class="text-xl text-gray-600">Freight Rate Calculator</h2>
+        </header>
+        
+        <div class="max-w-3xl mx-auto bg-white rounded-lg shadow-lg p-6">
+            <form id="calculatorForm" class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="origin" class="block text-sm font-medium text-gray-700 mb-1">
+                            Origin Port
+                        </label>
+                        <select 
+                            id="origin" 
+                            name="origin" 
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                            required
+                        >
+                            <option value="">Select origin port</option>
+                            <!-- Ports will be loaded dynamically -->
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <label for="destination" class="block text-sm font-medium text-gray-700 mb-1">
+                            Destination Port
+                        </label>
+                        <select 
+                            id="destination" 
+                            name="destination" 
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                            required
+                        >
+                            <option value="">Select destination port</option>
+                            <!-- Ports will be loaded dynamically -->
+                        </select>
+                    </div>
+                </div>
+                
+                <div>
+                    <label for="containerType" class="block text-sm font-medium text-gray-700 mb-1">
+                        Container Type
+                    </label>
+                    <select 
+                        id="containerType" 
+                        name="containerType" 
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        required
+                    >
+                        <option value="">Select container type</option>
+                        <!-- Container types will be loaded dynamically -->
+                    </select>
+                </div>
+                
+                <div>
+                    <label for="email" class="block text-sm font-medium text-gray-700 mb-1">
+                        Email Address
+                    </label>
+                    <input 
+                        type="email" 
+                        id="email" 
+                        name="email" 
+                        placeholder="your@email.com" 
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        required
+                    />
+                    <p class="mt-1 text-xs text-gray-500">
+                        We'll send the calculation results to this email address.
+                    </p>
+                </div>
+                
+                <div class="flex justify-center">
+                    <button 
+                        type="submit" 
+                        class="px-6 py-3 bg-blue-600 text-white font-medium rounded-md shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
+                    >
+                        Calculate Rate
+                    </button>
+                </div>
+            </form>
+            
+            <div id="resultContainer" class="mt-8 hidden">
+                <h3 class="text-lg font-medium text-gray-900 mb-4">Freight Rate Estimate</h3>
+                
+                <div class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                    <div class="flex flex-col md:flex-row justify-between mb-4">
+                        <div>
+                            <p class="text-sm text-gray-500">Route</p>
+                            <p id="routeDisplay" class="font-medium"></p>
+                        </div>
+                        <div>
+                            <p class="text-sm text-gray-500">Container</p>
+                            <p id="containerDisplay" class="font-medium"></p>
+                        </div>
+                        <div>
+                            <p class="text-sm text-gray-500">Date</p>
+                            <p id="dateDisplay" class="font-medium"></p>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <p class="text-sm text-gray-500 mb-1">Rate Range (USD)</p>
+                        <div class="flex items-center">
+                            <span id="minRate" class="text-sm font-medium"></span>
+                            <div class="flex-1 mx-4">
+                                <div class="h-2 bg-gray-200 rounded-full">
+                                    <div id="rateIndicator" class="h-2 bg-blue-600 rounded-full relative">
+                                        <div class="absolute -top-6 left-1/2 transform -translate-x-1/2 bg-blue-600 text-white px-2 py-1 rounded text-xs">
+                                            <span id="avgRate"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <span id="maxRate" class="text-sm font-medium"></span>
+                        </div>
+                    </div>
+                    
+                    <div class="flex flex-col md:flex-row justify-between text-sm">
+                        <div>
+                            <span class="text-gray-500">Based on </span>
+                            <span id="sourceCount" class="font-medium"></span>
+                            <span class="text-gray-500"> market sources</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">Reliability: </span>
+                            <span id="reliability" class="font-medium"></span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-4 text-center">
+                    <p class="text-sm text-gray-500">
+                        A copy of this calculation has been saved to your history.
+                    </p>
+                </div>
+            </div>
+        </div>
+        
+        <footer class="mt-12 text-center text-sm text-gray-500">
+            <p>© <span id="currentYear"></span> TSP Transport OÜ. All rights reserved.</p>
+            <p class="mt-1">
+                Freight rates are estimates based on current market data and may vary.
+            </p>
+        </footer>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>
