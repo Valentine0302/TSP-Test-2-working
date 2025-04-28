@@ -15,9 +15,10 @@ import contexScraper from './contex_scraper.js'; // Assuming this is New ConTex
 import istfixScraper from './istfix_scraper.js';
 import ctsScraper from './cts_scraper.js';
 
-// Импорт модулей анализа и расчета
+import scraperAdapters from './scraper_adapters.js';
 import seasonalityAnalyzer from './seasonality_analyzer.js';
 import fuelSurchargeCalculator from './fuel_surcharge_calculator.js';
+import webSearchIndices from './web_search_indices.js'; // Import web search module
 
 // Загрузка переменных окружения
 dotenv.config();
@@ -159,9 +160,9 @@ async function calculateFreightRate(originPortId, destinationPortId, containerTy
     const fetchStep = { stage: 'Fetch Index Data', sources: {} };
     const indexPromises = {
       SCFI: scfiScraper.getSCFIDataForCalculation(), // Предполагаем, что эта функция есть и возвращает { current_index, change, index_date }
-      FBX: fbxScraper.getFBXDataForCalculation(),   // Аналогично
-      WCI: wciScraper.getWCIDataForCalculation(),   // Аналогично
-      CCFI: ccfiScraper.getCCFIDataForCalculation(), // Аналогично
+      FBX: scraperAdapters.getFBXDataForCalculationAdapter(),   // Используем адаптер
+      WCI: scraperAdapters.getWCIDataForCalculationAdapter(),   // Используем адаптер
+      CCFI: scraperAdapters.getCCFIDataForCalculationAdapter(), // Используем адаптер
       Harpex: harpexScraper.getHarpexDataForCalculation(), // Аналогично
       NewConTex: contexScraper.getContexDataForCalculation(), // Аналогично
       BDI: bdiScraper.getBDIDataForCalculation(),       // Аналогично
@@ -176,8 +177,28 @@ async function calculateFreightRate(originPortId, destinationPortId, containerTy
         indexData[key] = indexResults[i].value;
         fetchStep.sources[key] = { status: 'Success', value: indexData[key] };
       } else {
-        indexData[key] = null;
-        fetchStep.sources[key] = { status: 'Failed', reason: indexResults[i].reason?.message || 'No data returned' };
+        // Primary fetch failed, try web search fallback
+        console.log(`[Fallback] Primary fetch for ${key} failed. Reason: ${indexResults[i].reason?.message || 'No data returned'}. Trying web search...`);
+        try {
+          const webSearchResult = await webSearchIndices.searchIndexValue(key);
+          if (webSearchResult && webSearchResult.value) {
+            indexData[key] = { 
+              current_index: webSearchResult.value, 
+              index_date: webSearchResult.date, 
+              source: 'web_search' // Mark data as coming from web search
+            };
+            fetchStep.sources[key] = { status: 'Success (Web Search Fallback)', value: indexData[key] };
+            console.log(`[Fallback] Web search for ${key} successful.`);
+          } else {
+            indexData[key] = null;
+            fetchStep.sources[key] = { status: 'Failed (Fallback Failed)', reason: 'Web search did not return valid data' };
+            console.log(`[Fallback] Web search for ${key} failed.`);
+          }
+        } catch (webSearchError) {
+          indexData[key] = null;
+          fetchStep.sources[key] = { status: 'Failed (Fallback Error)', reason: webSearchError.message };
+          console.error(`[Fallback] Error during web search for ${key}:`, webSearchError);
+        }
       }
     });
     if (debugMode) debugLog.push(fetchStep);
@@ -334,7 +355,6 @@ async function calculateFreightRate(originPortId, destinationPortId, containerTy
       allSourcesUsed.push(d.source);
       allRatesUsed.push(d.rate);
     });
-    finalCalcStep.sourceCount = coreSourcesData.length;
 
     // Добавляем информацию о модификаторах, если они применялись
     if (modifierStep.modifiersApplied.Charter) allSourcesUsed.push('Charter Modifier');
@@ -344,6 +364,7 @@ async function calculateFreightRate(originPortId, destinationPortId, containerTy
     if (fuelSurchargeStep.surcharge > 0) allSourcesUsed.push('Fuel Surcharge');
 
     finalCalcStep.sourcesUsed = allSourcesUsed;
+    finalCalcStep.sourceCount = allSourcesUsed.length; // Считаем все использованные источники после добавления всех источников
 
     // Расчет диапазона на основе стандартного отклонения *основных* индексов
     const coreStdDev = calculateStandardDeviation(coreSourcesData.map(d => d.rate));
