@@ -1,53 +1,28 @@
 /**
- * Shanghai Containerized Freight Index (SCFI) Scraper Module
- * =========================================================
+ * Shanghai Containerized Freight Index (SCFI) Scraper
  * 
- * Этот модуль предназначен для сбора данных из Shanghai Containerized Freight Index (SCFI),
- * который является важным индикатором стоимости морских контейнерных перевозок.
+ * Модуль для сбора данных из Shanghai Shipping Exchange и альтернативных источников
+ * о значениях индекса SCFI (Shanghai Containerized Freight Index).
  * 
- * SCFI публикуется еженедельно Shanghai Shipping Exchange (SSE) и отражает
- * изменения фрахтовых ставок на основных маршрутах из портов Китая.
- * 
- * Модуль использует несколько источников данных для обеспечения надежности:
- * 1. Основной источник: Shanghai Shipping Exchange (SSE)
- * 2. Альтернативные источники (в порядке приоритета):
- *    - MacroMicro (финансовая аналитическая платформа)
- *    - FreightWaves (новостной портал о грузоперевозках)
- *    - Container News (отраслевой новостной портал)
- *    - Hellenic Shipping News (морской новостной портал)
- * 
- * Данные сохраняются в базе данных PostgreSQL для последующего использования
- * в расчетах фрахтовых ставок и анализе тенденций рынка.
+ * Модуль предоставляет функции для получения актуальных данных SCFI,
+ * их обработки, сохранения в базу данных и предоставления для расчетов.
  * 
  * @module scfi_scraper
- * @author TSP Team
+ * @author TSP Transport OÜ
  * @version 2.0.0
- * @last_updated 2025-04-28
  */
 
-// Импорт необходимых модулей
-const axios = require('axios'); // HTTP-клиент для выполнения запросов
-const cheerio = require('cheerio'); // Библиотека для парсинга HTML
-const { Pool } = require('pg'); // Клиент PostgreSQL для работы с базой данных
-const dotenv = require('dotenv'); // Модуль для загрузки переменных окружения
+import axios from 'axios';
+import cheerio from 'cheerio';
+import { Pool } from 'pg';
+import dotenv from 'dotenv';
+import { setTimeout } from 'timers/promises';
+import { format, subDays, parseISO } from 'date-fns';
 
-/**
- * Загрузка переменных окружения из файла .env
- * Это позволяет хранить конфиденциальные данные (например, строки подключения к БД)
- * вне кода и не включать их в систему контроля версий
- */
+// Загрузка переменных окружения
 dotenv.config();
 
-/**
- * Настройка подключения к базе данных PostgreSQL
- * Используется пул соединений для эффективного управления подключениями
- * 
- * Параметры подключения:
- * - connectionString: строка подключения к базе данных из переменных окружения
- * - ssl: настройки SSL для безопасного подключения
- *   - rejectUnauthorized: false - позволяет подключаться к серверам с самоподписанными сертификатами
- *   - sslmode: 'require' - требует использования SSL
- */
+// Подключение к базе данных
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -56,22 +31,10 @@ const pool = new Pool({
   }
 });
 
-/**
- * URL для получения данных SCFI с основного источника
- * Shanghai Shipping Exchange (SSE) - официальный источник данных SCFI
- * @constant {string}
- */
+// URL для получения данных SCFI
 const SCFI_URL = 'https://en.sse.net.cn/indices/scfinew.jsp';
-
-/**
- * Альтернативные источники данных SCFI
- * Используются в случае недоступности основного источника
- * Порядок важен: источники проверяются последовательно
- * 
- * Изменен порядок: MacroMicro на втором месте, FreightWaves на третьем
- * MacroMicro предоставляет более структурированные и надежные данные
- * @constant {Array<string>}
- */
+// Альтернативные источники данных
+// Изменен порядок: MacroMicro на втором месте, FreightWaves на третьем
 const SCFI_ALT_URLS = [
   'https://en.macromicro.me/series/17502/fbx-global-container-index-weekly',
   'https://www.freightwaves.com/news/tag/scfi',
@@ -79,294 +42,246 @@ const SCFI_ALT_URLS = [
   'https://www.hellenicshippingnews.com/shanghai-containerized-freight-index/'
 ];
 
-/**
- * Константы для настройки HTTP-запросов
- * @constant {Object}
- */
+// Конфигурация HTTP-запросов
 const HTTP_CONFIG = {
-  // Таймаут запроса в миллисекундах
-  TIMEOUT: 15000,
-  
-  // Максимальное количество повторных попыток
-  MAX_RETRIES: 3,
-  
-  // Задержка между повторными попытками в миллисекундах
-  RETRY_DELAY: 2000,
-  
-  // Заголовки для имитации реального браузера
-  HEADERS: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Cache-Control': 'max-age=0'
-  }
+  TIMEOUT: 30000, // 30 секунд
+  MAX_RETRIES: 3, // Максимальное количество повторных попыток
+  RETRY_DELAY: 2000, // Задержка между повторными попытками (2 секунды)
+  USER_AGENTS: [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+  ]
 };
 
-/**
- * Константы для работы с базой данных
- * @constant {Object}
- */
+// Конфигурация базы данных
 const DB_CONFIG = {
-  // Название таблицы для хранения данных SCFI
-  TABLE_NAME: 'freight_indices_scfi',
-  
-  // Максимальное количество соединений в пуле
-  MAX_POOL_SIZE: 10,
-  
-  // Время ожидания для получения соединения из пула (в миллисекундах)
-  CONNECTION_TIMEOUT: 10000,
-  
-  // Время простоя соединения перед его закрытием (в миллисекундах)
-  IDLE_TIMEOUT: 30000
+  TABLE_NAME: 'scfi_data',
+  RETENTION_DAYS: 365 // Хранение данных за последний год
 };
 
 /**
- * Основная функция для получения данных SCFI
+ * Функция для получения данных SCFI
  * 
- * Эта функция координирует процесс получения данных:
- * 1. Пытается получить данные с основного источника
- * 2. Если основной источник недоступен, перебирает альтернативные источники
- * 3. Сохраняет полученные данные в базу данных
- * 4. В случае ошибки возвращает моковые данные
+ * Пытается получить данные с основного источника (Shanghai Shipping Exchange).
+ * Если не удается, пробует альтернативные источники.
+ * Если все источники недоступны, возвращает моковые данные.
  * 
  * @async
  * @function fetchSCFIData
  * @returns {Promise<Array>} Массив объектов с данными SCFI
- * @throws {Error} Если не удалось получить данные ни с одного источника
  */
 async function fetchSCFIData() {
-  // Логирование начала процесса
   console.log('Fetching Shanghai Containerized Freight Index data...');
-  console.log(`Current time: ${new Date().toISOString()}`);
+  
+  // Попытка получить данные с основного источника
+  let scfiData = [];
   
   try {
-    // Счетчик попыток для отладки
-    let attemptCount = 0;
-    let scfiData = null;
+    console.log(`Fetching SCFI data from primary source: ${SCFI_URL}`);
+    scfiData = await fetchSCFIDataFromPrimarySource();
+    console.log(`Successfully fetched ${scfiData.length} SCFI records from primary source`);
+  } catch (error) {
+    console.error('Error fetching SCFI data from primary source:', error.message);
+    console.log('Trying alternative sources...');
     
-    // Попытка получить данные с основного источника
-    console.log(`Attempt ${++attemptCount}: Trying primary source: ${SCFI_URL}`);
-    scfiData = await fetchSCFIFromPrimarySource();
-    
-    // Проверка полученных данных
-    if (scfiData && Array.isArray(scfiData) && scfiData.length > 0) {
-      console.log(`Successfully fetched ${scfiData.length} records from primary source`);
-    } else {
-      console.log('Primary source returned no data or invalid data');
-      
-      // Если не удалось получить данные с основного источника, используем альтернативные
-      for (const altUrl of SCFI_ALT_URLS) {
-        console.log(`Attempt ${++attemptCount}: Trying alternative source: ${altUrl}`);
-        scfiData = await fetchSCFIFromAlternativeSource(altUrl);
+    // Если основной источник недоступен, пробуем альтернативные
+    for (const url of SCFI_ALT_URLS) {
+      try {
+        console.log(`Trying alternative source: ${url}`);
+        scfiData = await fetchSCFIDataFromAlternativeSource(url);
         
-        // Проверка полученных данных
-        if (scfiData && Array.isArray(scfiData) && scfiData.length > 0) {
-          console.log(`Successfully fetched ${scfiData.length} records from alternative source: ${altUrl}`);
+        if (scfiData.length > 0) {
+          console.log(`Successfully fetched ${scfiData.length} SCFI records from alternative source: ${url}`);
           break;
         } else {
-          console.log(`Alternative source ${altUrl} returned no data or invalid data`);
+          console.log(`No data found from alternative source: ${url}`);
         }
+      } catch (error) {
+        console.error(`Error fetching SCFI data from alternative source ${url}:`, error.message);
       }
     }
-    
-    // Если данные получены, сохраняем их в базу данных
-    if (scfiData && Array.isArray(scfiData) && scfiData.length > 0) {
-      console.log(`Saving ${scfiData.length} SCFI records to database...`);
-      await saveSCFIData(scfiData);
-      console.log('SCFI data successfully saved to database');
-      return scfiData;
-    } else {
-      // Если не удалось получить данные ни с одного источника, генерируем ошибку
-      console.error('Failed to fetch SCFI data from all sources');
-      throw new Error('Failed to fetch SCFI data from all sources');
-    }
-  } catch (error) {
-    // Логирование ошибки
-    console.error('Error fetching SCFI data:', error);
-    console.error('Stack trace:', error.stack);
-    
-    // В случае ошибки возвращаем моковые данные
-    console.log('Falling back to mock data');
-    return fetchMockSCFIData();
-  } finally {
-    // Логирование завершения процесса
-    console.log(`SCFI data fetching process completed at ${new Date().toISOString()}`);
   }
+  
+  // Если не удалось получить данные ни с одного источника, используем моковые данные
+  if (scfiData.length === 0) {
+    console.log('Failed to fetch SCFI data from all sources, using mock data');
+    scfiData = await fetchMockSCFIData();
+  }
+  
+  // Сохранение полученных данных в базу данных
+  try {
+    console.log('Saving fetched SCFI data to database...');
+    await saveSCFIData(scfiData);
+    console.log('SCFI data successfully saved to database');
+  } catch (error) {
+    console.error('Error saving SCFI data to database:', error.message);
+    console.log('Continuing without saving to database');
+  }
+  
+  // Очистка устаревших данных
+  try {
+    console.log(`Cleaning up SCFI data older than ${DB_CONFIG.RETENTION_DAYS} days...`);
+    await cleanupOldSCFIData();
+    console.log('Old SCFI data cleanup completed');
+  } catch (error) {
+    console.error('Error cleaning up old SCFI data:', error.message);
+  }
+  
+  return scfiData;
 }
 
 /**
- * Функция для получения данных SCFI с основного источника (Shanghai Shipping Exchange)
+ * Функция для получения данных SCFI с основного источника
  * 
- * Эта функция выполняет следующие шаги:
- * 1. Отправляет HTTP-запрос на сайт SSE
- * 2. Парсит HTML-страницу для извлечения данных
- * 3. Извлекает даты индексов из заголовков таблицы
- * 4. Извлекает данные о маршрутах, индексах и изменениях
- * 5. Форматирует данные в структурированный массив объектов
+ * Парсит данные с официального сайта Shanghai Shipping Exchange.
  * 
  * @async
- * @function fetchSCFIFromPrimarySource
+ * @function fetchSCFIDataFromPrimarySource
  * @returns {Promise<Array>} Массив объектов с данными SCFI
- * @throws {Error} Если не удалось получить данные с основного источника
+ * @throws {Error} Если не удалось получить данные
  */
-async function fetchSCFIFromPrimarySource() {
-  // Логирование начала процесса
-  console.log('Fetching SCFI data from primary source...');
+async function fetchSCFIDataFromPrimarySource() {
+  // Выбор случайного User-Agent для запроса
+  const randomUserAgent = HTTP_CONFIG.USER_AGENTS[
+    Math.floor(Math.random() * HTTP_CONFIG.USER_AGENTS.length)
+  ];
   
-  // Переменные для отслеживания попыток и повторов
+  console.log(`Using User-Agent: ${randomUserAgent}`);
+  
+  // Настройка HTTP-запроса
+  const config = {
+    timeout: HTTP_CONFIG.TIMEOUT,
+    headers: {
+      'User-Agent': randomUserAgent,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Cache-Control': 'max-age=0'
+    }
+  };
+  
+  // Выполнение запроса с повторными попытками
   let retryCount = 0;
   let lastError = null;
   
-  // Цикл повторных попыток в случае ошибок
   while (retryCount <= HTTP_CONFIG.MAX_RETRIES) {
     try {
-      // Если это повторная попытка, добавляем задержку
-      if (retryCount > 0) {
-        console.log(`Retry attempt ${retryCount}/${HTTP_CONFIG.MAX_RETRIES} after ${HTTP_CONFIG.RETRY_DELAY}ms delay`);
-        await new Promise(resolve => setTimeout(resolve, HTTP_CONFIG.RETRY_DELAY));
-      }
+      console.log(`Fetching SCFI data from primary source (attempt ${retryCount + 1}/${HTTP_CONFIG.MAX_RETRIES + 1})...`);
       
-      // Отправка запроса на сайт Shanghai Shipping Exchange с имитацией реального браузера
-      console.log(`Sending HTTP request to ${SCFI_URL}`);
-      const response = await axios.get(SCFI_URL, {
-        headers: HTTP_CONFIG.HEADERS,
-        timeout: HTTP_CONFIG.TIMEOUT
-      });
+      // Выполнение HTTP-запроса
+      const response = await axios.get(SCFI_URL, config);
       
-      // Проверка успешности запроса
+      // Проверка статуса ответа
       if (response.status !== 200) {
-        throw new Error(`Failed to fetch SCFI data from primary source: HTTP status ${response.status}`);
+        throw new Error(`HTTP error! Status: ${response.status}`);
       }
-      
-      // Логирование успешного получения ответа
-      console.log(`Received response from ${SCFI_URL}, content length: ${response.data.length} bytes`);
       
       // Парсинг HTML-страницы
-      console.log('Parsing HTML response...');
+      console.log('Parsing SCFI data from HTML response...');
       const $ = cheerio.load(response.data);
       
-      // Извлечение данных из таблицы
+      // Получение текущей даты
+      const currentDate = new Date().toISOString().split('T')[0];
+      console.log(`Using current date: ${currentDate}`);
+      
+      // Предыдущая дата - неделю назад
+      const prevDate = new Date();
+      prevDate.setDate(prevDate.getDate() - 7);
+      const previousDate = prevDate.toISOString().split('T')[0];
+      console.log(`Using previous date: ${previousDate}`);
+      
+      // Массив для хранения данных SCFI
       const scfiData = [];
       
-      // Получение текущей даты из заголовка таблицы
-      let currentDate = '';
-      let previousDate = '';
-      
-      // Ищем заголовки с датами
-      console.log('Extracting dates from table headers...');
-      $('th, td').each((i, el) => {
-        const text = $(el).text().trim();
-        if (text.includes('Current Index') && text.includes('-')) {
-          const dateMatch = text.match(/(\d{4}-\d{2}-\d{2})/);
-          if (dateMatch) {
-            currentDate = dateMatch[1];
-            console.log(`Found current date in headers: ${currentDate}`);
-          }
-        } else if (text.includes('Previous Index') && text.includes('-')) {
-          const dateMatch = text.match(/(\d{4}-\d{2}-\d{2})/);
-          if (dateMatch) {
-            previousDate = dateMatch[1];
-            console.log(`Found previous date in headers: ${previousDate}`);
-          }
-        }
-      });
-      
-      // Если даты не найдены, используем текущую дату
-      if (!currentDate) {
-        currentDate = new Date().toISOString().split('T')[0];
-        console.log(`Current date not found in headers, using current date: ${currentDate}`);
-      }
-      if (!previousDate) {
-        // Предыдущая дата - неделю назад
-        const prevDate = new Date();
-        prevDate.setDate(prevDate.getDate() - 7);
-        previousDate = prevDate.toISOString().split('T')[0];
-        console.log(`Previous date not found in headers, using date from week ago: ${previousDate}`);
-      }
-      
-      console.log(`Using dates: Current date: ${currentDate}, Previous date: ${previousDate}`);
-      
-      // Находим таблицу с данными SCFI (4-я таблица на странице)
-      console.log('Searching for SCFI data table...');
+      // Поиск таблицы с данными SCFI
       const tables = $('table');
       console.log(`Found ${tables.length} tables on the page`);
       
-      if (tables.length >= 4) {
-        const scfiTable = tables.eq(3); // Индексация с 0, поэтому 4-я таблица имеет индекс 3
-        console.log('Found SCFI data table (4th table on the page)');
+      // Обработка каждой таблицы
+      tables.each((tableIndex, table) => {
+        // Проверка, содержит ли таблица данные SCFI
+        const tableText = $(table).text().toLowerCase();
         
-        // Парсинг строк таблицы
-        console.log('Parsing table rows...');
-        let rowCount = 0;
-        let validRowCount = 0;
-        
-        scfiTable.find('tr').each((i, row) => {
-          // Пропускаем заголовок таблицы
-          if (i === 0) {
-            console.log('Skipping header row');
-            return;
-          }
+        if (tableText.includes('scfi') || 
+            tableText.includes('shanghai containerized freight index') || 
+            tableText.includes('freight index')) {
+          console.log(`Table ${tableIndex + 1} contains SCFI data`);
           
-          rowCount++;
-          const cells = $(row).find('td');
+          // Получение строк таблицы
+          const rows = $(table).find('tr');
+          console.log(`Found ${rows.length} rows in SCFI table`);
           
-          // Проверяем, что строка содержит нужное количество колонок
-          if (cells.length >= 5) {
-            const route = $(cells[0]).text().trim();
-            const unit = $(cells[1]).text().trim();
-            const weighting = $(cells[2]).text().trim().replace('%', '');
-            const previousIndex = $(cells[3]).text().trim();
-            const currentIndex = $(cells[4]).text().trim();
-            const change = cells.length > 5 ? $(cells[5]).text().trim() : '';
+          // Обработка каждой строки
+          rows.each((rowIndex, row) => {
+            // Пропускаем заголовок таблицы
+            if (rowIndex === 0) return;
             
-            // Логирование извлеченных данных для отладки
-            console.log(`Row ${rowCount}: Route: "${route}", Unit: "${unit}", Current Index: "${currentIndex}", Change: "${change}"`);
+            // Получение ячеек строки
+            const cells = $(row).find('td');
             
-            // Извлечение числовых значений
-            const currentIndexValue = parseFloat(currentIndex.replace(',', ''));
-            const previousIndexValue = parseFloat(previousIndex.replace(',', ''));
-            const changeValue = parseFloat(change.replace(',', ''));
-            const weightingValue = parseFloat(weighting);
-            
-            // Проверка валидности данных
-            if (route && !isNaN(currentIndexValue)) {
-              validRowCount++;
+            // Проверка наличия достаточного количества ячеек
+            if (cells.length >= 3) {
+              // Извлечение данных из ячеек
+              const route = $(cells[0]).text().trim();
+              const currentIndexText = $(cells[1]).text().trim().replace(/,/g, '');
+              const changeText = $(cells[2]).text().trim().replace(/,/g, '');
               
-              // Добавление данных в массив
-              scfiData.push({
-                route: route,
-                unit: unit,
-                weighting: isNaN(weightingValue) ? 0 : weightingValue,
-                previousIndex: isNaN(previousIndexValue) ? 0 : previousIndexValue,
-                currentIndex: currentIndexValue,
-                change: isNaN(changeValue) ? 0 : changeValue,
-                previousDate: previousDate,
-                currentDate: currentDate
-              });
+              // Преобразование текстовых значений в числа
+              const currentIndexValue = parseFloat(currentIndexText);
+              let changeValue = parseFloat(changeText);
               
-              console.log(`Added data for route: ${route}, current index: ${currentIndexValue}, change: ${changeValue}`);
+              // Проверка на отрицательное изменение
+              if (!isNaN(changeValue) && changeText.includes('-')) {
+                changeValue = -Math.abs(changeValue);
+              }
+              
+              // Определение, является ли маршрут композитным индексом
+              const isComposite = route.toLowerCase().includes('composite') || 
+                                 route.toLowerCase().includes('comprehensive') || 
+                                 route === '';
+              
+              // Форматирование названия маршрута
+              const finalRoute = isComposite ? 'Comprehensive Index' : route;
+              
+              // Добавление данных в массив, если индекс является числом
+              if (!isNaN(currentIndexValue)) {
+                console.log(`Adding data for route: ${finalRoute}, Current Index: ${currentIndexValue}, Change: ${changeValue}`);
+                
+                scfiData.push({
+                  route: finalRoute,
+                  unit: 'USD/TEU',
+                  weighting: isComposite ? 100 : 0,
+                  previousIndex: currentIndexValue - changeValue,
+                  currentIndex: currentIndexValue,
+                  change: changeValue,
+                  previousDate: previousDate,
+                  currentDate: currentDate
+                });
+                
+                console.log(`Successfully added data for route: ${finalRoute}`);
+              } else {
+                console.log(`Skipping invalid row: Route: "${route}", Current Index: ${isNaN(currentIndexValue) ? 'NaN' : currentIndexValue}`);
+              }
             } else {
-              console.log(`Skipping invalid row: Route: "${route}", Current Index: ${isNaN(currentIndexValue) ? 'NaN' : currentIndexValue}`);
+              console.log(`Skipping row ${rowIndex + 1} with insufficient columns (${cells.length} < 3)`);
             }
-          } else {
-            console.log(`Skipping row ${rowCount} with insufficient columns (${cells.length} < 5)`);
-          }
-        });
-        
-        console.log(`Processed ${rowCount} rows, found ${validRowCount} valid rows`);
-      } else {
-        console.log(`Not enough tables found on the page (${tables.length} < 4)`);
-      }
+          });
+        } else {
+          console.log(`Table ${tableIndex + 1} does not contain SCFI data`);
+        }
+      });
       
       // Проверка полученных данных
-      if (scfiData.length === 0) {
-        console.log('No SCFI data found in the table');
-        throw new Error('No SCFI data found in the table');
-      }
+      console.log(`Parsed ${scfiData.length} SCFI records from primary source`);
       
-      console.log(`Successfully parsed ${scfiData.length} SCFI records from primary source`);
+      // Если данные не найдены, выбрасываем ошибку
+      if (scfiData.length === 0) {
+        throw new Error('No SCFI data found on the page');
+      }
       
       // Возвращаем полученные данные
       return scfiData;
@@ -377,67 +292,75 @@ async function fetchSCFIFromPrimarySource() {
       // Логирование ошибки
       console.error(`Error fetching SCFI data from primary source (attempt ${retryCount + 1}/${HTTP_CONFIG.MAX_RETRIES + 1}):`, error.message);
       
+      // Если есть еще попытки, ждем перед следующей
+      if (retryCount < HTTP_CONFIG.MAX_RETRIES) {
+        const delay = HTTP_CONFIG.RETRY_DELAY * (retryCount + 1);
+        console.log(`Waiting ${delay}ms before retry...`);
+        await setTimeout(delay);
+      }
+      
       // Увеличиваем счетчик попыток
       retryCount++;
     }
   }
   
   // Если все попытки неудачны, выбрасываем последнюю ошибку
-  console.error('All retry attempts failed');
+  console.error('All retry attempts failed for primary source');
   throw lastError || new Error('Failed to fetch SCFI data from primary source after multiple attempts');
 }
 
 /**
- * Функция для получения данных SCFI с альтернативного источника
+ * Функция для получения данных SCFI из альтернативного источника
  * 
- * Эта функция адаптируется к различным форматам данных на разных сайтах:
- * - MacroMicro: извлекает данные из специальных элементов с классами 'value' и 'change'
- * - FreightWaves, Container News, Hellenic Shipping News: извлекает данные из таблиц или статей
+ * Парсит данные с альтернативных источников, таких как новостные сайты
+ * и аналитические порталы.
  * 
  * @async
- * @function fetchSCFIFromAlternativeSource
- * @param {string} url - URL альтернативного источника данных
+ * @function fetchSCFIDataFromAlternativeSource
+ * @param {string} url - URL альтернативного источника
  * @returns {Promise<Array>} Массив объектов с данными SCFI
- * @throws {Error} Если не удалось получить данные с альтернативного источника
+ * @throws {Error} Если не удалось получить данные
  */
-async function fetchSCFIFromAlternativeSource(url) {
-  // Логирование начала процесса
-  console.log(`Fetching SCFI data from alternative source: ${url}`);
+async function fetchSCFIDataFromAlternativeSource(url) {
+  // Выбор случайного User-Agent для запроса
+  const randomUserAgent = HTTP_CONFIG.USER_AGENTS[
+    Math.floor(Math.random() * HTTP_CONFIG.USER_AGENTS.length)
+  ];
   
-  // Переменные для отслеживания попыток и повторов
+  console.log(`Using User-Agent for alternative source: ${randomUserAgent}`);
+  
+  // Настройка HTTP-запроса
+  const config = {
+    timeout: HTTP_CONFIG.TIMEOUT,
+    headers: {
+      'User-Agent': randomUserAgent,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Cache-Control': 'max-age=0'
+    }
+  };
+  
+  // Выполнение запроса с повторными попытками
   let retryCount = 0;
   let lastError = null;
   
-  // Цикл повторных попыток в случае ошибок
   while (retryCount <= HTTP_CONFIG.MAX_RETRIES) {
     try {
-      // Если это повторная попытка, добавляем задержку
-      if (retryCount > 0) {
-        console.log(`Retry attempt ${retryCount}/${HTTP_CONFIG.MAX_RETRIES} after ${HTTP_CONFIG.RETRY_DELAY}ms delay`);
-        await new Promise(resolve => setTimeout(resolve, HTTP_CONFIG.RETRY_DELAY));
-      }
+      console.log(`Fetching SCFI data from alternative source ${url} (attempt ${retryCount + 1}/${HTTP_CONFIG.MAX_RETRIES + 1})...`);
       
-      // Отправка запроса на альтернативный сайт с имитацией реального браузера
-      console.log(`Sending HTTP request to ${url}`);
-      const response = await axios.get(url, {
-        headers: HTTP_CONFIG.HEADERS,
-        timeout: HTTP_CONFIG.TIMEOUT
-      });
+      // Выполнение HTTP-запроса
+      const response = await axios.get(url, config);
       
-      // Проверка успешности запроса
+      // Проверка статуса ответа
       if (response.status !== 200) {
-        throw new Error(`Failed to fetch SCFI data from alternative source: HTTP status ${response.status}`);
+        throw new Error(`HTTP error! Status: ${response.status}`);
       }
-      
-      // Логирование успешного получения ответа
-      console.log(`Received response from ${url}, content length: ${response.data.length} bytes`);
       
       // Парсинг HTML-страницы
-      console.log('Parsing HTML response...');
+      console.log('Parsing SCFI data from HTML response...');
       const $ = cheerio.load(response.data);
-      
-      // Извлечение данных из статей или таблиц
-      const scfiData = [];
       
       // Получение текущей даты
       const currentDate = new Date().toISOString().split('T')[0];
@@ -447,249 +370,186 @@ async function fetchSCFIFromAlternativeSource(url) {
       const prevDate = new Date();
       prevDate.setDate(prevDate.getDate() - 7);
       const previousDate = prevDate.toISOString().split('T')[0];
-      console.log(`Using previous date (week ago): ${previousDate}`);
+      console.log(`Using previous date: ${previousDate}`);
       
-      // Специальная обработка для MacroMicro
-      if (url.includes('macromicro.me')) {
-        console.log('Detected MacroMicro source, using specialized parsing logic');
+      // Массив для хранения данных SCFI
+      const scfiData = [];
+      
+      // Поиск таблиц с данными SCFI
+      const tables = $('table');
+      console.log(`Found ${tables.length} tables on the page`);
+      
+      let tableCount = 0;
+      
+      // Обработка каждой таблицы
+      tables.each((i, table) => {
+        tableCount++;
+        const tableText = $(table).text().toLowerCase();
         
-        // Ищем значение индекса в элементах с классом 'value' или 'chart-value'
-        console.log('Searching for index value elements...');
-        const valueElements = $('.value, .chart-value, .data-value');
-        console.log(`Found ${valueElements.length} potential value elements`);
-        
-        let currentIndexValue = null;
-        
-        valueElements.each((i, el) => {
-          const text = $(el).text().trim();
-          console.log(`Value element ${i + 1} text: "${text}"`);
+        // Проверка, содержит ли таблица данные SCFI
+        if (tableText.includes('scfi') || 
+            tableText.includes('shanghai') || 
+            tableText.includes('freight index') || 
+            tableText.includes('container')) {
+          console.log(`Table ${tableCount} contains potential SCFI data`);
           
-          const indexMatch = text.match(/(\d+(\.\d+)?)/);
-          if (indexMatch) {
-            currentIndexValue = parseFloat(indexMatch[1]);
-            console.log(`Found index value: ${currentIndexValue}`);
-            return false; // Прерываем цикл после нахождения первого значения
-          }
-        });
-        
-        // Ищем изменение индекса
-        console.log('Searching for change value elements...');
-        const changeElements = $('.change, .chart-change, .data-change');
-        console.log(`Found ${changeElements.length} potential change elements`);
-        
-        let changeValue = 0;
-        
-        changeElements.each((i, el) => {
-          const text = $(el).text().trim();
-          console.log(`Change element ${i + 1} text: "${text}"`);
+          // Получение строк таблицы
+          const rows = $(table).find('tr');
+          console.log(`Found ${rows.length} rows in table ${tableCount}`);
           
-          const changeMatch = text.match(/([-+]?\d+(\.\d+)?)/);
-          if (changeMatch) {
-            changeValue = parseFloat(changeMatch[1]);
-            console.log(`Found change value: ${changeValue}`);
-            return false; // Прерываем цикл после нахождения первого значения
-          }
-        });
-        
-        // Если нашли значение индекса, добавляем его в данные
-        if (currentIndexValue !== null) {
-          console.log(`Adding data: Index: ${currentIndexValue}, Change: ${changeValue}`);
+          let rowCount = 0;
           
-          scfiData.push({
-            route: 'Comprehensive Index',
-            unit: 'USD/TEU',
-            weighting: 100,
-            previousIndex: currentIndexValue - changeValue,
-            currentIndex: currentIndexValue,
-            change: changeValue,
-            previousDate: previousDate,
-            currentDate: currentDate
-          });
-          
-          console.log('Successfully added MacroMicro data');
-        } else {
-          console.log('No valid index value found on MacroMicro page');
-        }
-      } 
-      // Обработка для FreightWaves и других источников
-      else {
-        console.log(`Detected standard source (${url}), using general parsing logic`);
-        
-        // Поиск таблиц с данными SCFI
-        console.log('Searching for tables with SCFI data...');
-        const tables = $('table');
-        console.log(`Found ${tables.length} tables on the page`);
-        
-        let tableCount = 0;
-        
-        tables.each((i, table) => {
-          tableCount++;
-          
-          // Проверяем, содержит ли таблица данные SCFI
-          const tableText = $(table).text();
-          const containsSCFI = tableText.includes('SCFI');
-          const containsFreightIndex = tableText.includes('Shanghai Containerized Freight Index');
-          
-          console.log(`Table ${tableCount}: Contains SCFI: ${containsSCFI}, Contains Freight Index: ${containsFreightIndex}`);
-          
-          if (containsSCFI || containsFreightIndex) {
-            console.log(`Found relevant table ${tableCount}, parsing rows...`);
+          // Обработка каждой строки
+          rows.each((j, row) => {
+            rowCount++;
             
-            let rowCount = 0;
+            // Получение ячеек строки
+            const cells = $(row).find('td, th');
             
-            $(table).find('tr').each((j, row) => {
-              // Пропускаем заголовок таблицы
-              if (j === 0) {
-                console.log('Skipping header row');
-                return;
-              }
+            // Проверка наличия достаточного количества ячеек
+            if (cells.length >= 2) {
+              // Извлечение данных из ячеек
+              const firstCell = $(cells[0]).text().trim();
+              const secondCell = $(cells[1]).text().trim().replace(/,/g, '');
               
-              rowCount++;
-              const cells = $(row).find('td');
+              // Определение, является ли строка данными индекса
+              const isIndexRow = firstCell.toLowerCase().includes('scfi') || 
+                               firstCell.toLowerCase().includes('shanghai') || 
+                               firstCell.toLowerCase().includes('composite') || 
+                               firstCell.toLowerCase().includes('comprehensive') || 
+                               firstCell === '';
               
-              // Проверяем, что строка содержит нужное количество колонок
-              if (cells.length >= 2) {
-                let route = '';
-                let currentIndex = '';
-                let change = '';
+              // Если это строка с индексом, извлекаем значение
+              if (isIndexRow) {
+                // Поиск числового значения во второй ячейке
+                const indexMatch = secondCell.match(/(\d+(\.\d+)?)/);
                 
-                // Разные сайты могут иметь разную структуру таблиц
-                if (url.includes('freightwaves.com')) {
-                  route = cells.length > 0 ? $(cells[0]).text().trim() : '';
-                  currentIndex = cells.length > 1 ? $(cells[1]).text().trim() : '';
-                  change = cells.length > 2 ? $(cells[2]).text().trim() : '';
-                  console.log(`FreightWaves row ${rowCount}: Route: "${route}", Current Index: "${currentIndex}", Change: "${change}"`);
-                } else if (url.includes('container-news.com')) {
-                  route = cells.length > 0 ? $(cells[0]).text().trim() : '';
-                  currentIndex = cells.length > 1 ? $(cells[1]).text().trim() : '';
-                  change = cells.length > 2 ? $(cells[2]).text().trim() : '';
-                  console.log(`Container News row ${rowCount}: Route: "${route}", Current Index: "${currentIndex}", Change: "${change}"`);
-                } else if (url.includes('hellenicshippingnews.com')) {
-                  route = cells.length > 0 ? $(cells[0]).text().trim() : '';
-                  currentIndex = cells.length > 1 ? $(cells[1]).text().trim() : '';
-                  change = cells.length > 2 ? $(cells[2]).text().trim() : '';
-                  console.log(`Hellenic Shipping News row ${rowCount}: Route: "${route}", Current Index: "${currentIndex}", Change: "${change}"`);
-                } else {
-                  // Общий случай для других сайтов
-                  route = cells.length > 0 ? $(cells[0]).text().trim() : '';
-                  currentIndex = cells.length > 1 ? $(cells[1]).text().trim() : '';
-                  change = cells.length > 2 ? $(cells[2]).text().trim() : '';
-                  console.log(`Generic source row ${rowCount}: Route: "${route}", Current Index: "${currentIndex}", Change: "${change}"`);
+                if (indexMatch) {
+                  const currentIndexValue = parseFloat(indexMatch[1]);
+                  console.log(`Found index value: ${currentIndexValue}`);
+                  
+                  // Поиск изменения индекса
+                  let changeValue = 0;
+                  let changeCell = '';
+                  
+                  // Проверка наличия ячейки с изменением
+                  if (cells.length >= 3) {
+                    changeCell = $(cells[2]).text().trim().replace(/,/g, '');
+                    const changeMatch = changeCell.match(/(-?\d+(\.\d+)?)/);
+                    
+                    if (changeMatch) {
+                      changeValue = parseFloat(changeMatch[1]);
+                      
+                      // Проверка на отрицательное изменение
+                      if (!changeCell.includes('-') && changeCell.toLowerCase().includes('down')) {
+                        changeValue = -Math.abs(changeValue);
+                      }
+                      
+                      console.log(`Found change value: ${changeValue}`);
+                    }
+                  }
+                  
+                  // Определение названия маршрута
+                  const route = 'Comprehensive Index';
+                  
+                  // Добавление данных в массив, если индекс является числом
+                  if (!isNaN(currentIndexValue)) {
+                    console.log(`Adding data for route: ${route}, Current Index: ${currentIndexValue}, Change: ${changeValue}`);
+                    
+                    scfiData.push({
+                      route: route,
+                      unit: 'USD/TEU',
+                      weighting: 100,
+                      previousIndex: currentIndexValue - changeValue,
+                      currentIndex: currentIndexValue,
+                      change: changeValue,
+                      previousDate: previousDate,
+                      currentDate: currentDate
+                    });
+                    
+                    console.log(`Successfully added data for route: ${route}`);
+                  } else {
+                    console.log(`Skipping invalid row: Route: "${firstCell}", Current Index: ${isNaN(currentIndexValue) ? 'NaN' : currentIndexValue}`);
+                  }
                 }
-                
-                // Извлечение числового значения индекса
-                const currentIndexMatch = currentIndex.match(/(\d+(\.\d+)?)/);
-                const currentIndexValue = currentIndexMatch ? parseFloat(currentIndexMatch[1]) : NaN;
-                
-                // Извлечение числового значения изменения
-                const changeMatch = change.match(/([-+]?\d+(\.\d+)?)/);
-                const changeValue = changeMatch ? parseFloat(changeMatch[1]) : 0;
-                
-                // Проверка валидности данных
-                if (route && !isNaN(currentIndexValue)) {
-                  // Определяем, является ли это композитным индексом
-                  const isComposite = route.toLowerCase().includes('composite') || 
-                                     route.toLowerCase().includes('global') || 
-                                     route.toLowerCase().includes('overall');
-                  
-                  const finalRoute = isComposite ? 'Comprehensive Index' : route;
-                  
-                  console.log(`Adding data for route: ${finalRoute}, current index: ${currentIndexValue}, change: ${changeValue}`);
-                  
-                  // Добавление данных в массив
-                  scfiData.push({
-                    route: finalRoute,
-                    unit: 'USD/TEU',
-                    weighting: isComposite ? 100 : 0,
-                    previousIndex: currentIndexValue - changeValue,
-                    currentIndex: currentIndexValue,
-                    change: changeValue,
-                    previousDate: previousDate,
-                    currentDate: currentDate
-                  });
-                  
-                  console.log(`Successfully added data for route: ${finalRoute}`);
-                } else {
-                  console.log(`Skipping invalid row: Route: "${route}", Current Index: ${isNaN(currentIndexValue) ? 'NaN' : currentIndexValue}`);
-                }
-              } else {
-                console.log(`Skipping row ${rowCount} with insufficient columns (${cells.length} < 2)`);
-              }
-            });
-            
-            console.log(`Processed ${rowCount} rows from table ${tableCount}`);
-          }
-        });
-        
-        // Если таблицы не найдены или не содержат данных, ищем данные в тексте статей
-        if (scfiData.length === 0) {
-          console.log('No data found in tables, searching in article text...');
-          
-          // Ищем в статьях упоминания индекса SCFI и его значения
-          const articles = $('article, .article, .post, .entry, .content');
-          console.log(`Found ${articles.length} potential article elements`);
-          
-          let articleCount = 0;
-          
-          articles.each((i, article) => {
-            articleCount++;
-            const articleText = $(article).text();
-            console.log(`Analyzing article ${articleCount}, text length: ${articleText.length} characters`);
-            
-            // Ищем упоминание композитного индекса SCFI
-            const indexMatch = articleText.match(/SCFI.*?(\d+(\.\d+)?)/i);
-            
-            if (indexMatch) {
-              const currentIndexValue = parseFloat(indexMatch[1]);
-              console.log(`Found SCFI index value in article: ${currentIndexValue}`);
-              
-              // Ищем упоминание изменения индекса
-              const changeMatch = articleText.match(/(up|down|increased|decreased|rose|fell).*?(\d+(\.\d+)?)/i);
-              let changeValue = 0;
-              
-              if (changeMatch) {
-                changeValue = parseFloat(changeMatch[2]);
-                const direction = changeMatch[1].toLowerCase();
-                
-                // Определяем направление изменения
-                if (direction.includes('down') || 
-                    direction.includes('decreased') || 
-                    direction.includes('fell')) {
-                  changeValue = -changeValue;
-                }
-                
-                console.log(`Found change value in article: ${changeValue} (${direction})`);
-              } else {
-                console.log('No change value found in article, using default: 0');
-              }
-              
-              // Добавление данных в массив, если индекс является числом
-              if (!isNaN(currentIndexValue)) {
-                console.log(`Adding data from article: Index: ${currentIndexValue}, Change: ${changeValue}`);
-                
-                scfiData.push({
-                  route: 'Comprehensive Index',
-                  unit: 'USD/TEU',
-                  weighting: 100,
-                  previousIndex: currentIndexValue - changeValue,
-                  currentIndex: currentIndexValue,
-                  change: changeValue,
-                  previousDate: previousDate,
-                  currentDate: currentDate
-                });
-                
-                console.log('Successfully added data from article');
-                
-                // Берем только первое найденное значение
-                return false;
-              } else {
-                console.log(`Invalid index value found in article: ${currentIndexValue}`);
               }
             } else {
-              console.log('No SCFI index value found in article');
+              console.log(`Skipping row ${rowCount} with insufficient columns (${cells.length} < 2)`);
             }
           });
+          
+          console.log(`Processed ${rowCount} rows from table ${tableCount}`);
         }
+      });
+      
+      // Если таблицы не найдены или не содержат данных, ищем данные в тексте статей
+      if (scfiData.length === 0) {
+        console.log('No data found in tables, searching in article text...');
+        
+        // Ищем в статьях упоминания индекса SCFI и его значения
+        const articles = $('article, .article, .post, .entry, .content');
+        console.log(`Found ${articles.length} potential article elements`);
+        
+        let articleCount = 0;
+        
+        articles.each((i, article) => {
+          articleCount++;
+          const articleText = $(article).text();
+          console.log(`Analyzing article ${articleCount}, text length: ${articleText.length} characters`);
+          
+          // Ищем упоминание композитного индекса SCFI
+          const indexMatch = articleText.match(/SCFI.*?(\d+(\.\d+)?)/i);
+          
+          if (indexMatch) {
+            const currentIndexValue = parseFloat(indexMatch[1]);
+            console.log(`Found SCFI index value in article: ${currentIndexValue}`);
+            
+            // Ищем упоминание изменения индекса
+            const changeMatch = articleText.match(/(up|down|increased|decreased|rose|fell).*?(\d+(\.\d+)?)/i);
+            let changeValue = 0;
+            
+            if (changeMatch) {
+              changeValue = parseFloat(changeMatch[2]);
+              const direction = changeMatch[1].toLowerCase();
+              
+              // Определяем направление изменения
+              if (direction.includes('down') || 
+                  direction.includes('decreased') || 
+                  direction.includes('fell')) {
+                changeValue = -changeValue;
+              }
+              
+              console.log(`Found change value in article: ${changeValue} (${direction})`);
+            } else {
+              console.log('No change value found in article, using default: 0');
+            }
+            
+            // Добавление данных в массив, если индекс является числом
+            if (!isNaN(currentIndexValue)) {
+              console.log(`Adding data from article: Index: ${currentIndexValue}, Change: ${changeValue}`);
+              
+              scfiData.push({
+                route: 'Comprehensive Index',
+                unit: 'USD/TEU',
+                weighting: 100,
+                previousIndex: currentIndexValue - changeValue,
+                currentIndex: currentIndexValue,
+                change: changeValue,
+                previousDate: previousDate,
+                currentDate: currentDate
+              });
+              
+              console.log('Successfully added data from article');
+              
+              // Берем только первое найденное значение
+              return false;
+            } else {
+              console.log(`Invalid index value found in article: ${currentIndexValue}`);
+            }
+          } else {
+            console.log('No SCFI index value found in article');
+          }
+        });
       }
       
       // Проверка полученных данных
@@ -703,6 +563,13 @@ async function fetchSCFIFromAlternativeSource(url) {
       
       // Логирование ошибки
       console.error(`Error fetching SCFI data from alternative source ${url} (attempt ${retryCount + 1}/${HTTP_CONFIG.MAX_RETRIES + 1}):`, error.message);
+      
+      // Если есть еще попытки, ждем перед следующей
+      if (retryCount < HTTP_CONFIG.MAX_RETRIES) {
+        const delay = HTTP_CONFIG.RETRY_DELAY * (retryCount + 1);
+        console.log(`Waiting ${delay}ms before retry...`);
+        await setTimeout(delay);
+      }
       
       // Увеличиваем счетчик попыток
       retryCount++;
@@ -964,6 +831,37 @@ async function saveSCFIData(scfiData) {
 }
 
 /**
+ * Функция для очистки устаревших данных SCFI
+ * 
+ * Удаляет данные старше указанного периода хранения.
+ * 
+ * @async
+ * @function cleanupOldSCFIData
+ * @throws {Error} Если не удалось очистить данные
+ */
+async function cleanupOldSCFIData() {
+  // Получение соединения из пула
+  const client = await pool.connect();
+  
+  try {
+    // Удаление данных старше периода хранения
+    const query = `
+      DELETE FROM ${DB_CONFIG.TABLE_NAME}
+      WHERE current_date < NOW() - INTERVAL '${DB_CONFIG.RETENTION_DAYS} days'
+    `;
+    
+    const result = await client.query(query);
+    console.log(`Deleted ${result.rowCount} old SCFI records`);
+  } catch (error) {
+    console.error('Error cleaning up old SCFI data:', error);
+    throw error;
+  } finally {
+    // Освобождение клиента
+    client.release();
+  }
+}
+
+/**
  * Функция для получения данных SCFI для расчета ставки фрахта
  * 
  * Эта функция используется калькулятором фрахтовых ставок для получения
@@ -1010,12 +908,9 @@ async function getSCFIDataForCalculation() {
       console.log(`Formatted SCFI data: Index: ${indexValue}, Change: ${changeValue}, Date: ${formattedDate}`);
       
       return {
-        index: 'SCFI',
-        value: indexValue,
+        current_index: indexValue,
         change: changeValue,
-        date: formattedDate,
-        trend: changeValue > 0 ? 'up' : 'down',
-        source: 'database'
+        index_date: formattedDate
       };
     }
     
@@ -1045,12 +940,9 @@ async function getSCFIDataForCalculation() {
         console.log(`Formatted SCFI data from API: Index: ${indexValue}, Change: ${changeValue}, Date: ${formattedDate}`);
         
         return {
-          index: 'SCFI',
-          value: indexValue,
+          current_index: indexValue,
           change: changeValue,
-          date: formattedDate,
-          trend: changeValue > 0 ? 'up' : 'down',
-          source: 'api'
+          index_date: formattedDate
         };
       }
     } catch (error) {
@@ -1062,12 +954,9 @@ async function getSCFIDataForCalculation() {
     const currentDate = new Date().toISOString().split('T')[0];
     
     return {
-      index: 'SCFI',
-      value: 1347.84,
+      current_index: 1347.84,
       change: -22.74,
-      date: currentDate,
-      trend: 'down',
-      source: 'mock'
+      index_date: currentDate
     };
   } catch (error) {
     console.error('Error getting SCFI data for calculation:', error);
@@ -1077,12 +966,9 @@ async function getSCFIDataForCalculation() {
     const currentDate = new Date().toISOString().split('T')[0];
     
     return {
-      index: 'SCFI',
-      value: 1347.84,
+      current_index: 1347.84,
       change: -22.74,
-      date: currentDate,
-      trend: 'down',
-      source: 'mock'
+      index_date: currentDate
     };
   }
 }
@@ -1101,231 +987,102 @@ async function getSCFIDataForCalculation() {
  */
 async function getSCFIDataForRoute(origin, destination) {
   try {
-    console.log(`Getting SCFI data for route: Origin: ${origin}, Destination: ${destination}`);
+    console.log(`Getting SCFI data for route: ${origin} -> ${destination}...`);
     
-    // Определение региона порта отправления
-    const originRegion = await getPortRegionById(origin);
-    console.log(`Origin port region: ${originRegion}`);
+    // Получение регионов портов
+    const originRegion = await getPortRegion(origin);
+    const destinationRegion = await getPortRegion(destination);
     
-    // Определение региона порта назначения
-    const destinationRegion = await getPortRegionById(destination);
-    console.log(`Destination port region: ${destinationRegion}`);
-    
-    // Создание шаблонов поиска маршрута на основе регионов
-    let routePatterns = [];
-    
-    // Сопоставление регионов с маршрутами SCFI
-    if (originRegion === 'Asia' && destinationRegion === 'Europe') {
-      routePatterns.push('%Europe%');
-      routePatterns.push('%Mediterranean%');
-      console.log('Route patterns for Asia to Europe: %Europe%, %Mediterranean%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'North America') {
-      if (isWestCoast(destination)) {
-        routePatterns.push('%USWC%');
-        routePatterns.push('%West Coast%');
-        console.log('Route patterns for Asia to North America (West Coast): %USWC%, %West Coast%');
-      } else {
-        routePatterns.push('%USEC%');
-        routePatterns.push('%East Coast%');
-        console.log('Route patterns for Asia to North America (East Coast): %USEC%, %East Coast%');
-      }
-    } else if (originRegion === 'Asia' && destinationRegion === 'Middle East') {
-      routePatterns.push('%Persian Gulf%');
-      routePatterns.push('%Red Sea%');
-      console.log('Route patterns for Asia to Middle East: %Persian Gulf%, %Red Sea%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'Oceania') {
-      routePatterns.push('%Australia%');
-      routePatterns.push('%New Zealand%');
-      console.log('Route patterns for Asia to Oceania: %Australia%, %New Zealand%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'Africa') {
-      if (isWestAfrica(destination)) {
-        routePatterns.push('%West Africa%');
-        console.log('Route patterns for Asia to West Africa: %West Africa%');
-      } else if (isSouthAfrica(destination)) {
-        routePatterns.push('%South Africa%');
-        console.log('Route patterns for Asia to South Africa: %South Africa%');
-      } else {
-        routePatterns.push('%Africa%');
-        console.log('Route patterns for Asia to Africa: %Africa%');
-      }
-    } else if (originRegion === 'Asia' && destinationRegion === 'South America') {
-      routePatterns.push('%South America%');
-      console.log('Route patterns for Asia to South America: %South America%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'Asia') {
-      if (isJapan(destination)) {
-        if (isWestJapan(destination)) {
-          routePatterns.push('%West Japan%');
-          console.log('Route patterns for Asia to West Japan: %West Japan%');
-        } else {
-          routePatterns.push('%East Japan%');
-          console.log('Route patterns for Asia to East Japan: %East Japan%');
-        }
-      } else {
-        routePatterns.push('%Southeast Asia%');
-        console.log('Route patterns for Asia to Southeast Asia: %Southeast Asia%');
-      }
-    } else {
-      console.log(`No specific route patterns for ${originRegion} to ${destinationRegion}, using composite index`);
+    if (!originRegion || !destinationRegion) {
+      console.log('Could not determine port regions');
+      return null;
     }
     
-    // Поиск подходящего маршрута в данных SCFI
-    for (const pattern of routePatterns) {
-      console.log(`Searching for route matching pattern: ${pattern}`);
-      
-      const query = `
-        SELECT * FROM ${DB_CONFIG.TABLE_NAME} 
-        WHERE route ILIKE $1 
-        ORDER BY current_date DESC 
-        LIMIT 1
-      `;
-      
-      const result = await pool.query(query, [pattern]);
-      
-      if (result.rows.length > 0) {
-        console.log(`Found matching route: ${result.rows[0].route}`);
-        return result.rows[0];
-      } else {
-        console.log(`No matching route found for pattern: ${pattern}`);
-      }
+    console.log(`Port regions: ${originRegion} -> ${destinationRegion}`);
+    
+    // Маппинг регионов на маршруты SCFI
+    const routeMapping = {
+      'Asia-Europe': 'Europe (Base port)',
+      'Asia-Mediterranean': 'Mediterranean (Base port)',
+      'Asia-USWC': 'USWC (Base port)',
+      'Asia-USEC': 'USEC (Base port)',
+      'Asia-Persian Gulf': 'Persian Gulf (Dubai)',
+      'Asia-Australia': 'Australia/New Zealand',
+      'Asia-Southeast Asia': 'Southeast Asia (Singapore)'
+    };
+    
+    // Определение маршрута SCFI
+    const routeKey = `${originRegion}-${destinationRegion}`;
+    const scfiRoute = routeMapping[routeKey];
+    
+    if (!scfiRoute) {
+      console.log(`No SCFI route mapping for ${routeKey}`);
+      return null;
     }
     
-    // Если точное совпадение не найдено, вернем композитный индекс SCFI
-    console.log('No specific route match found, falling back to composite index');
+    console.log(`Mapped to SCFI route: ${scfiRoute}`);
     
-    const compositeQuery = `
+    // Получение данных SCFI для маршрута
+    const query = `
       SELECT * FROM ${DB_CONFIG.TABLE_NAME} 
-      WHERE route = 'Comprehensive Index' 
+      WHERE route = $1
       ORDER BY current_date DESC 
       LIMIT 1
     `;
     
-    const compositeResult = await pool.query(compositeQuery);
+    const result = await pool.query(query, [scfiRoute]);
     
-    if (compositeResult.rows.length > 0) {
-      console.log(`Using composite index: ${compositeResult.rows[0].route}`);
-      return compositeResult.rows[0];
+    if (result.rows.length > 0) {
+      const data = result.rows[0];
+      console.log(`Found SCFI data for route ${scfiRoute}:`, data);
+      
+      return {
+        route: data.route,
+        currentIndex: parseFloat(data.current_index) || 0,
+        change: parseFloat(data.change) || 0,
+        currentDate: data.current_date instanceof Date 
+          ? data.current_date.toISOString().split('T')[0]
+          : data.current_date
+      };
     } else {
-      console.log('No composite index found');
+      console.log(`No SCFI data found for route ${scfiRoute}`);
       return null;
     }
   } catch (error) {
     console.error('Error getting SCFI data for route:', error);
-    console.error('Stack trace:', error.stack);
     return null;
   }
 }
 
 /**
- * Вспомогательная функция для определения региона порта по его ID
+ * Функция для получения региона порта
+ * 
+ * Вспомогательная функция для определения региона порта по его ID.
  * 
  * @async
- * @function getPortRegionById
+ * @function getPortRegion
  * @param {string} portId - ID порта
- * @returns {Promise<string>} Регион порта или 'Unknown', если порт не найден
+ * @returns {Promise<string|null>} Регион порта или null, если порт не найден
  */
-async function getPortRegionById(portId) {
+async function getPortRegion(portId) {
   try {
-    console.log(`Getting region for port ID: ${portId}`);
-    
-    const result = await pool.query('SELECT region FROM ports WHERE id = $1', [portId]);
+    const query = 'SELECT region FROM ports WHERE id = $1';
+    const result = await pool.query(query, [portId]);
     
     if (result.rows.length > 0) {
-      console.log(`Port ${portId} region: ${result.rows[0].region}`);
       return result.rows[0].region;
     } else {
-      console.log(`Port ${portId} not found in database`);
-      return 'Unknown';
+      return null;
     }
   } catch (error) {
-    console.error(`Error getting port region for port ${portId}:`, error);
-    return 'Unknown';
+    console.error('Error getting port region:', error);
+    return null;
   }
 }
 
-/**
- * Вспомогательная функция для определения, находится ли порт на западном побережье
- * 
- * @function isWestCoast
- * @param {string} portId - ID порта
- * @returns {boolean} true, если порт находится на западном побережье, иначе false
- */
-function isWestCoast(portId) {
-  // Список кодов портов западного побережья США
-  const westCoastPorts = ['USLAX', 'USSEA', 'USOAK', 'USLGB', 'USPDX', 'USSFO'];
-  return westCoastPorts.includes(portId);
-}
-
-/**
- * Вспомогательная функция для определения, находится ли порт в Западной Африке
- * 
- * @function isWestAfrica
- * @param {string} portId - ID порта
- * @returns {boolean} true, если порт находится в Западной Африке, иначе false
- */
-function isWestAfrica(portId) {
-  // Список кодов портов Западной Африки
-  const westAfricaPorts = ['NGLAG', 'GHTEM', 'CIABJ', 'SNDAR'];
-  return westAfricaPorts.includes(portId);
-}
-
-/**
- * Вспомогательная функция для определения, находится ли порт в Южной Африке
- * 
- * @function isSouthAfrica
- * @param {string} portId - ID порта
- * @returns {boolean} true, если порт находится в Южной Африке, иначе false
- */
-function isSouthAfrica(portId) {
-  // Список кодов портов Южной Африки
-  const southAfricaPorts = ['ZADUR', 'ZACPT', 'MZMPM'];
-  return southAfricaPorts.includes(portId);
-}
-
-/**
- * Вспомогательная функция для определения, находится ли порт в Японии
- * 
- * @function isJapan
- * @param {string} portId - ID порта
- * @returns {boolean} true, если порт находится в Японии, иначе false
- */
-function isJapan(portId) {
-  // Список кодов портов Японии
-  const japanPorts = ['JPOSA', 'JPNGO', 'JPUKB', 'JPTYO', 'JPYOK'];
-  return japanPorts.includes(portId);
-}
-
-/**
- * Вспомогательная функция для определения, находится ли порт в Западной Японии
- * 
- * @function isWestJapan
- * @param {string} portId - ID порта
- * @returns {boolean} true, если порт находится в Западной Японии, иначе false
- */
-function isWestJapan(portId) {
-  // Список кодов портов Западной Японии
-  const westJapanPorts = ['JPOSA', 'JPUKB'];
-  return westJapanPorts.includes(portId);
-}
-
-/**
- * Экспорт функций для использования в других модулях
- * @module scfi_scraper
- */
-module.exports = {
+// Экспорт функций модуля
+export default {
   fetchSCFIData,
-  getSCFIDataForRoute,
-  getSCFIDataForCalculation
+  getSCFIDataForCalculation,
+  getSCFIDataForRoute
 };
-
-/**
- * Специальный хак для совместимости с ES модулями в server.js
- * Это позволяет использовать модуль как в CommonJS, так и в ES модулях
- */
-if (typeof exports === 'object' && typeof module !== 'undefined') {
-  Object.defineProperty(exports, '__esModule', { value: true });
-  exports.default = {
-    fetchSCFIData,
-    getSCFIDataForRoute,
-    getSCFIDataForCalculation
-  };
-}
