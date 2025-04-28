@@ -17,7 +17,6 @@ import cheerio from 'cheerio';
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import { setTimeout } from 'timers/promises';
-import { format, subDays, parseISO } from 'date-fns';
 
 // Загрузка переменных окружения
 dotenv.config();
@@ -61,6 +60,34 @@ const DB_CONFIG = {
   TABLE_NAME: 'scfi_data',
   RETENTION_DAYS: 365 // Хранение данных за последний год
 };
+
+/**
+ * Форматирует дату в строку формата YYYY-MM-DD
+ * 
+ * @function formatDate
+ * @param {Date} date - Объект даты для форматирования
+ * @returns {string} Строка даты в формате YYYY-MM-DD
+ */
+function formatDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Вычитает указанное количество дней из даты
+ * 
+ * @function subtractDays
+ * @param {Date} date - Исходная дата
+ * @param {number} days - Количество дней для вычитания
+ * @returns {Date} Новая дата
+ */
+function subtractDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() - days);
+  return result;
+}
 
 /**
  * Функция для получения данных SCFI
@@ -185,13 +212,12 @@ async function fetchSCFIDataFromPrimarySource() {
       const $ = cheerio.load(response.data);
       
       // Получение текущей даты
-      const currentDate = new Date().toISOString().split('T')[0];
+      const currentDate = formatDate(new Date());
       console.log(`Using current date: ${currentDate}`);
       
       // Предыдущая дата - неделю назад
-      const prevDate = new Date();
-      prevDate.setDate(prevDate.getDate() - 7);
-      const previousDate = prevDate.toISOString().split('T')[0];
+      const prevDate = subtractDays(new Date(), 7);
+      const previousDate = formatDate(prevDate);
       console.log(`Using previous date: ${previousDate}`);
       
       // Массив для хранения данных SCFI
@@ -363,13 +389,12 @@ async function fetchSCFIDataFromAlternativeSource(url) {
       const $ = cheerio.load(response.data);
       
       // Получение текущей даты
-      const currentDate = new Date().toISOString().split('T')[0];
+      const currentDate = formatDate(new Date());
       console.log(`Using current date: ${currentDate}`);
       
       // Предыдущая дата - неделю назад
-      const prevDate = new Date();
-      prevDate.setDate(prevDate.getDate() - 7);
-      const previousDate = prevDate.toISOString().split('T')[0];
+      const prevDate = subtractDays(new Date(), 7);
+      const previousDate = formatDate(prevDate);
       console.log(`Using previous date: ${previousDate}`);
       
       // Массив для хранения данных SCFI
@@ -596,13 +621,12 @@ async function fetchMockSCFIData() {
   console.log('Using mock data for SCFI');
   
   // Получение текущей даты
-  const currentDate = new Date().toISOString().split('T')[0];
+  const currentDate = formatDate(new Date());
   console.log(`Using current date for mock data: ${currentDate}`);
   
   // Предыдущая дата - неделю назад
-  const prevDate = new Date();
-  prevDate.setDate(prevDate.getDate() - 7);
-  const previousDate = prevDate.toISOString().split('T')[0];
+  const prevDate = subtractDays(new Date(), 7);
+  const previousDate = formatDate(prevDate);
   console.log(`Using previous date for mock data: ${previousDate}`);
   
   // Создание моковых данных на основе реальных значений SCFI
@@ -898,7 +922,7 @@ async function getSCFIDataForCalculation() {
       
       // Форматируем дату в строку в формате YYYY-MM-DD
       const formattedDate = data.current_date instanceof Date 
-        ? data.current_date.toISOString().split('T')[0]
+        ? formatDate(data.current_date)
         : data.current_date;
       
       // Преобразуем числовые значения с помощью parseFloat
@@ -930,7 +954,7 @@ async function getSCFIDataForCalculation() {
         
         // Форматируем дату в строку в формате YYYY-MM-DD
         const formattedDate = compositeData.currentDate instanceof Date 
-          ? compositeData.currentDate.toISOString().split('T')[0]
+          ? formatDate(compositeData.currentDate)
           : compositeData.currentDate;
         
         // Преобразуем числовые значения с помощью parseFloat
@@ -951,7 +975,7 @@ async function getSCFIDataForCalculation() {
     
     // Если данные не удалось получить, возвращаем моковые данные
     console.log('Failed to get SCFI data, using mock data');
-    const currentDate = new Date().toISOString().split('T')[0];
+    const currentDate = formatDate(new Date());
     
     return {
       current_index: 1347.84,
@@ -963,7 +987,7 @@ async function getSCFIDataForCalculation() {
     console.error('Stack trace:', error.stack);
     
     // В случае ошибки возвращаем моковые данные
-    const currentDate = new Date().toISOString().split('T')[0];
+    const currentDate = formatDate(new Date());
     
     return {
       current_index: 1347.84,
@@ -1041,7 +1065,7 @@ async function getSCFIDataForRoute(origin, destination) {
         currentIndex: parseFloat(data.current_index) || 0,
         change: parseFloat(data.change) || 0,
         currentDate: data.current_date instanceof Date 
-          ? data.current_date.toISOString().split('T')[0]
+          ? formatDate(data.current_date)
           : data.current_date
       };
     } else {
