@@ -616,12 +616,17 @@ async function getSCFIDataForCalculation() {
       const data = result.rows[0];
       console.log('Found SCFI data in database:', data);
       
+      // Форматируем дату в строку в формате YYYY-MM-DD
+      const formattedDate = data.current_date instanceof Date 
+        ? data.current_date.toISOString().split('T')[0]
+        : data.current_date;
+      
       return {
         index: 'SCFI',
-        value: data.current_index,
-        change: data.change,
-        date: data.current_date,
-        trend: data.change > 0 ? 'up' : 'down',
+        value: parseFloat(data.current_index) || 0,
+        change: parseFloat(data.change) || 0,
+        date: formattedDate,
+        trend: parseFloat(data.change) > 0 ? 'up' : 'down',
         source: 'database'
       };
     }
@@ -640,12 +645,17 @@ async function getSCFIDataForCalculation() {
       if (compositeData) {
         console.log('Fetched SCFI data from API:', compositeData);
         
+        // Форматируем дату в строку в формате YYYY-MM-DD
+        const formattedDate = compositeData.currentDate instanceof Date 
+          ? compositeData.currentDate.toISOString().split('T')[0]
+          : compositeData.currentDate;
+        
         return {
           index: 'SCFI',
-          value: compositeData.currentIndex,
-          change: compositeData.change,
-          date: compositeData.currentDate,
-          trend: compositeData.change > 0 ? 'up' : 'down',
+          value: parseFloat(compositeData.currentIndex) || 0,
+          change: parseFloat(compositeData.change) || 0,
+          date: formattedDate,
+          trend: parseFloat(compositeData.change) > 0 ? 'up' : 'down',
           source: 'api'
         };
       }
@@ -655,11 +665,13 @@ async function getSCFIDataForCalculation() {
     
     // Если данные не удалось получить, возвращаем моковые данные
     console.log('Failed to get SCFI data, using mock data');
+    const currentDate = new Date().toISOString().split('T')[0];
+    
     return {
       index: 'SCFI',
       value: 1347.84,
       change: -22.74,
-      date: new Date().toISOString().split('T')[0],
+      date: currentDate,
       trend: 'down',
       source: 'mock'
     };
@@ -667,11 +679,13 @@ async function getSCFIDataForCalculation() {
     console.error('Error getting SCFI data for calculation:', error);
     
     // В случае ошибки возвращаем моковые данные
+    const currentDate = new Date().toISOString().split('T')[0];
+    
     return {
       index: 'SCFI',
       value: 1347.84,
       change: -22.74,
-      date: new Date().toISOString().split('T')[0],
+      date: currentDate,
       trend: 'down',
       source: 'mock'
     };
