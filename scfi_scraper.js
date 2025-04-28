@@ -30,7 +30,7 @@ const SCFI_ALT_URLS = [
 ];
 
 // Функция для получения данных SCFI
-async function fetchSCFIData() {
+async function fetchSCFIData()  {
   try {
     console.log('Fetching Shanghai Containerized Freight Index data...');
     
@@ -78,7 +78,7 @@ async function fetchSCFIFromPrimarySource() {
         'Referer': 'https://en.sse.net.cn/indices/index.jsp'
       },
       timeout: 15000
-    });
+    }) ;
     
     // Проверка успешности запроса
     if (response.status !== 200) {
@@ -518,9 +518,6 @@ async function fetchMockSCFIData() {
     }
   ];
   
-  // Сохранение моковых данных в базу данных
-  await saveSCFIData(mockData);
-  
   return mockData;
 }
 
@@ -589,34 +586,68 @@ async function saveSCFIData(scfiData) {
     // Откат транзакции в случае ошибки
     await client.query('ROLLBACK');
     console.error('Error saving SCFI data to database:', error);
-    throw error;
   } finally {
     // Освобождение клиента
     client.release();
   }
 }
 
-// Функция для получения данных SCFI для расчета ставки фрахта
-async function getSCFIDataForCalculation() {
+// Функция для получения данных SCFI для конкретного маршрута
+async function getSCFIDataForRoute(route) {
+  console.log(`Getting SCFI data for route: ${route}`);
+  
   try {
-    console.log('Getting SCFI data for calculation...');
-    
-    // Получение последних данных композитного индекса SCFI из базы данных
-    const query = `
+    // Получение данных из базы данных
+    const client = await pool.connect();
+    const result = await client.query(`
       SELECT * FROM freight_indices_scfi 
-      WHERE route = 'Comprehensive Index'
+      WHERE route = $1 
       ORDER BY current_date DESC 
       LIMIT 1
-    `;
+    `, [route]);
+    client.release();
     
-    const result = await pool.query(query);
+    // Если данные найдены, возвращаем их
+    if (result.rows.length > 0) {
+      return result.rows[0];
+    } else {
+      throw new Error(`No SCFI data found for route ${route}`);
+    }
+  } catch (error) {
+    console.error(`Error getting SCFI data for route ${route}:`, error);
     
-    // Если данные найдены в базе, возвращаем их
+    // В случае ошибки получаем все данные и фильтруем нужный маршрут
+    const allData = await fetchSCFIData();
+    const routeData = allData.find(data => data.route === route);
+    
+    if (routeData) {
+      return routeData;
+    } else {
+      throw new Error(`No SCFI data found for route ${route}`);
+    }
+  }
+}
+
+// Функция для получения данных SCFI для расчета
+async function getSCFIDataForCalculation() {
+  console.log('Getting SCFI data for calculation...');
+  
+  try {
+    // Получение данных из базы данных
+    const client = await pool.connect();
+    const result = await client.query(`
+      SELECT * FROM freight_indices_scfi 
+      WHERE route = 'Comprehensive Index' 
+      ORDER BY current_date DESC 
+      LIMIT 1
+    `);
+    client.release();
+    
+    // Если данные найдены, возвращаем их
     if (result.rows.length > 0) {
       const data = result.rows[0];
-      console.log('Found SCFI data in database:', data);
       
-      // Форматируем дату в строку в формате YYYY-MM-DD
+      // Форматирование даты
       const formattedDate = data.current_date instanceof Date 
         ? data.current_date.toISOString().split('T')[0]
         : data.current_date;
@@ -626,59 +657,17 @@ async function getSCFIDataForCalculation() {
         value: parseFloat(data.current_index) || 0,
         change: parseFloat(data.change) || 0,
         date: formattedDate,
-        trend: parseFloat(data.change) > 0 ? 'up' : 'down',
+        trend: data.change >= 0 ? 'up' : 'down',
         source: 'database'
       };
+    } else {
+      throw new Error('No SCFI data found in database');
     }
-    
-    // Если данных нет в базе, пытаемся получить их через API
-    console.log('No SCFI data in database, fetching from API...');
-    try {
-      const scfiData = await fetchSCFIData();
-      
-      // Ищем композитный индекс в полученных данных
-      const compositeData = scfiData.find(data => 
-        data.route === 'Comprehensive Index' || 
-        data.route.toLowerCase().includes('composite')
-      );
-      
-      if (compositeData) {
-        console.log('Fetched SCFI data from API:', compositeData);
-        
-        // Форматируем дату в строку в формате YYYY-MM-DD
-        const formattedDate = compositeData.currentDate instanceof Date 
-          ? compositeData.currentDate.toISOString().split('T')[0]
-          : compositeData.currentDate;
-        
-        return {
-          index: 'SCFI',
-          value: parseFloat(compositeData.currentIndex) || 0,
-          change: parseFloat(compositeData.change) || 0,
-          date: formattedDate,
-          trend: parseFloat(compositeData.change) > 0 ? 'up' : 'down',
-          source: 'api'
-        };
-      }
-    } catch (error) {
-      console.error('Error fetching SCFI data from API:', error);
-    }
-    
-    // Если данные не удалось получить, возвращаем моковые данные
-    console.log('Failed to get SCFI data, using mock data');
-    const currentDate = new Date().toISOString().split('T')[0];
-    
-    return {
-      index: 'SCFI',
-      value: 1347.84,
-      change: -22.74,
-      date: currentDate,
-      trend: 'down',
-      source: 'mock'
-    };
   } catch (error) {
     console.error('Error getting SCFI data for calculation:', error);
     
-    // В случае ошибки возвращаем моковые данные
+    // В случае ошибки используем моковые данные
+    // Получение текущей даты
     const currentDate = new Date().toISOString().split('T')[0];
     
     return {
@@ -690,137 +679,6 @@ async function getSCFIDataForCalculation() {
       source: 'mock'
     };
   }
-}
-
-// Функция для получения данных SCFI для конкретного маршрута
-async function getSCFIDataForRoute(origin, destination) {
-  try {
-    // Определение региона порта отправления
-    const originRegion = await getPortRegionById(origin);
-    
-    // Определение региона порта назначения
-    const destinationRegion = await getPortRegionById(destination);
-    
-    // Создание шаблонов поиска маршрута на основе регионов
-    let routePatterns = [];
-    
-    // Сопоставление регионов с маршрутами SCFI
-    if (originRegion === 'Asia' && destinationRegion === 'Europe') {
-      routePatterns.push('%Europe%');
-      routePatterns.push('%Mediterranean%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'North America') {
-      if (isWestCoast(destination)) {
-        routePatterns.push('%USWC%');
-        routePatterns.push('%West Coast%');
-      } else {
-        routePatterns.push('%USEC%');
-        routePatterns.push('%East Coast%');
-      }
-    } else if (originRegion === 'Asia' && destinationRegion === 'Middle East') {
-      routePatterns.push('%Persian Gulf%');
-      routePatterns.push('%Red Sea%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'Oceania') {
-      routePatterns.push('%Australia%');
-      routePatterns.push('%New Zealand%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'Africa') {
-      if (isWestAfrica(destination)) {
-        routePatterns.push('%West Africa%');
-      } else if (isSouthAfrica(destination)) {
-        routePatterns.push('%South Africa%');
-      } else {
-        routePatterns.push('%Africa%');
-      }
-    } else if (originRegion === 'Asia' && destinationRegion === 'South America') {
-      routePatterns.push('%South America%');
-    } else if (originRegion === 'Asia' && destinationRegion === 'Asia') {
-      if (isJapan(destination)) {
-        if (isWestJapan(destination)) {
-          routePatterns.push('%West Japan%');
-        } else {
-          routePatterns.push('%East Japan%');
-        }
-      } else {
-        routePatterns.push('%Southeast Asia%');
-      }
-    }
-    
-    // Поиск подходящего маршрута в данных SCFI
-    for (const pattern of routePatterns) {
-      const query = `
-        SELECT * FROM freight_indices_scfi 
-        WHERE route ILIKE $1 
-        ORDER BY current_date DESC 
-        LIMIT 1
-      `;
-      
-      const result = await pool.query(query, [pattern]);
-      
-      if (result.rows.length > 0) {
-        return result.rows[0];
-      }
-    }
-    
-    // Если точное совпадение не найдено, вернем композитный индекс SCFI
-    const compositeQuery = `
-      SELECT * FROM freight_indices_scfi 
-      WHERE route = 'Comprehensive Index' 
-      ORDER BY current_date DESC 
-      LIMIT 1
-    `;
-    
-    const compositeResult = await pool.query(compositeQuery);
-    
-    return compositeResult.rows.length > 0 ? compositeResult.rows[0] : null;
-  } catch (error) {
-    console.error('Error getting SCFI data for route:', error);
-    return null;
-  }
-}
-
-// Вспомогательная функция для определения региона порта по его ID
-async function getPortRegionById(portId) {
-  try {
-    const result = await pool.query('SELECT region FROM ports WHERE id = $1', [portId]);
-    return result.rows.length > 0 ? result.rows[0].region : 'Unknown';
-  } catch (error) {
-    console.error('Error getting port region:', error);
-    return 'Unknown';
-  }
-}
-
-// Вспомогательная функция для определения, находится ли порт на западном побережье
-function isWestCoast(portId) {
-  // Список кодов портов западного побережья США
-  const westCoastPorts = ['USLAX', 'USSEA', 'USOAK', 'USLGB', 'USPDX', 'USSFO'];
-  return westCoastPorts.includes(portId);
-}
-
-// Вспомогательная функция для определения, находится ли порт в Западной Африке
-function isWestAfrica(portId) {
-  // Список кодов портов Западной Африки
-  const westAfricaPorts = ['NGLAG', 'GHTEM', 'CIABJ', 'SNDAR'];
-  return westAfricaPorts.includes(portId);
-}
-
-// Вспомогательная функция для определения, находится ли порт в Южной Африке
-function isSouthAfrica(portId) {
-  // Список кодов портов Южной Африки
-  const southAfricaPorts = ['ZADUR', 'ZACPT', 'MZMPM'];
-  return southAfricaPorts.includes(portId);
-}
-
-// Вспомогательная функция для определения, находится ли порт в Японии
-function isJapan(portId) {
-  // Список кодов портов Японии
-  const japanPorts = ['JPOSA', 'JPNGO', 'JPUKB', 'JPTYO', 'JPYOK'];
-  return japanPorts.includes(portId);
-}
-
-// Вспомогательная функция для определения, находится ли порт в Западной Японии
-function isWestJapan(portId) {
-  // Список кодов портов Западной Японии
-  const westJapanPorts = ['JPOSA', 'JPUKB'];
-  return westJapanPorts.includes(portId);
 }
 
 // Экспорт функций
@@ -829,13 +687,3 @@ module.exports = {
   getSCFIDataForRoute,
   getSCFIDataForCalculation
 };
-
-// Специальный хак для совместимости с ES модулями в server.js
-if (typeof exports === 'object' && typeof module !== 'undefined') {
-  Object.defineProperty(exports, '__esModule', { value: true });
-  exports.default = {
-    fetchSCFIData,
-    getSCFIDataForRoute,
-    getSCFIDataForCalculation
-  };
-}
