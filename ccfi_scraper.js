@@ -20,8 +20,149 @@ const pool = new Pool({
 
 // URL для получения данных CCFI
 const CCFI_URL = 'https://en.sse.net.cn/indices/ccfinew.jsp';
-// Альтернативный источник данных
-const CCFI_ALT_URL = 'https://www.freightwaves.com/news/tag/ccfi';
+// Альтернативные источники данных (в порядке приоритета)
+const CCFI_ALT_URLS = [
+  'https://en.macromicro.me/series/20786/ccfi-composite-index',
+  'https://www.freightwaves.com/news/tag/ccfi',
+  'https://www.container-news.com/ccfi/',
+  'https://www.hellenicshippingnews.com/china-containerized-freight-index/'
+];
+
+// Константы для настройки HTTP-запросов
+const HTTP_CONFIG = {
+  // Таймаут запроса в миллисекундах
+  TIMEOUT: 15000,
+  // Максимальное количество повторных попыток
+  MAX_RETRIES: 3,
+  // Задержка между повторными попытками в миллисекундах
+  RETRY_DELAY: 2000,
+  // Заголовки для имитации реального браузера
+  HEADERS: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Cache-Control': 'max-age=0'
+  }
+};
+
+/**
+ * Функция-адаптер для преобразования данных в единый формат
+ * 
+ * Эта функция принимает данные в любом формате и преобразует их
+ * в единый формат с полями current_index, change, index_date,
+ * который ожидается сервером.
+ * 
+ * @function normalizeIndexData
+ * @param {Object} data - Данные индекса в любом формате
+ * @returns {Object} Данные в едином формате
+ */
+function normalizeIndexData(data) {
+  if (!data) {
+    console.error('Received null or undefined data in normalizeIndexData');
+    return null;
+  }
+
+  console.log('Normalizing index data:', JSON.stringify(data));
+
+  // Создаем новый объект с полями, ожидаемыми сервером
+  const normalizedData = {
+    current_index: null,
+    change: null,
+    index_date: null
+  };
+
+  // Определяем значение для current_index
+  if ('current_index' in data) {
+    normalizedData.current_index = parseFloat(data.current_index);
+  } else if ('currentIndex' in data) {
+    normalizedData.current_index = parseFloat(data.currentIndex);
+  } else if ('value' in data) {
+    normalizedData.current_index = parseFloat(data.value);
+  } else if ('index_value' in data) {
+    normalizedData.current_index = parseFloat(data.index_value);
+  } else if ('index' in data && typeof data.index === 'number') {
+    normalizedData.current_index = parseFloat(data.index);
+  }
+
+  // Определяем значение для change
+  if ('change' in data) {
+    normalizedData.change = parseFloat(data.change);
+  } else if ('index_change' in data) {
+    normalizedData.change = parseFloat(data.index_change);
+  } else if ('delta' in data) {
+    normalizedData.change = parseFloat(data.delta);
+  }
+
+  // Определяем значение для index_date
+  if ('index_date' in data) {
+    normalizedData.index_date = formatDate(data.index_date);
+  } else if ('indexDate' in data) {
+    normalizedData.index_date = formatDate(data.indexDate);
+  } else if ('date' in data) {
+    normalizedData.index_date = formatDate(data.date);
+  } else if ('current_date' in data) {
+    normalizedData.index_date = formatDate(data.current_date);
+  } else if ('timestamp' in data) {
+    normalizedData.index_date = formatDate(data.timestamp);
+  } else {
+    // Если дата не найдена, используем текущую дату
+    normalizedData.index_date = formatDate(new Date());
+  }
+
+  // Проверяем, что все поля имеют значения
+  if (normalizedData.current_index === null || isNaN(normalizedData.current_index)) {
+    console.warn('Failed to determine current_index value, using default');
+    normalizedData.current_index = 1850; // Значение по умолчанию для CCFI
+  }
+
+  if (normalizedData.change === null || isNaN(normalizedData.change)) {
+    console.warn('Failed to determine change value, using default');
+    normalizedData.change = 0; // Значение по умолчанию
+  }
+
+  if (!normalizedData.index_date) {
+    console.warn('Failed to determine index_date value, using current date');
+    normalizedData.index_date = formatDate(new Date());
+  }
+
+  console.log('Normalized data:', JSON.stringify(normalizedData));
+  return normalizedData;
+}
+
+/**
+ * Вспомогательная функция для форматирования даты
+ * 
+ * @function formatDate
+ * @param {Date|string} date - Дата для форматирования
+ * @returns {string} Дата в формате YYYY-MM-DD
+ */
+function formatDate(date) {
+  if (!date) {
+    return new Date().toISOString().split('T')[0];
+  }
+
+  if (typeof date === 'string') {
+    // Если дата уже в формате YYYY-MM-DD, возвращаем её
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return date;
+    }
+
+    // Пытаемся преобразовать строку в дату
+    const parsedDate = new Date(date);
+    if (!isNaN(parsedDate.getTime())) {
+      return parsedDate.toISOString().split('T')[0];
+    }
+  }
+
+  if (date instanceof Date) {
+    return date.toISOString().split('T')[0];
+  }
+
+  // Если не удалось преобразовать, возвращаем текущую дату
+  return new Date().toISOString().split('T')[0];
+}
 
 // Функция для получения данных CCFI
 async function fetchCCFIData() {
@@ -31,9 +172,17 @@ async function fetchCCFIData() {
     // Попытка получить данные с основного источника
     let ccfiData = await fetchCCFIFromPrimarySource();
     
-    // Если не удалось получить данные с основного источника, используем альтернативный
+    // Если не удалось получить данные с основного источника, используем альтернативные
     if (!ccfiData || ccfiData.length === 0) {
-      ccfiData = await fetchCCFIFromAlternativeSource();
+      for (const altUrl of CCFI_ALT_URLS) {
+        console.log(`Trying alternative source: ${altUrl}`);
+        ccfiData = await fetchCCFIFromAlternativeSource(altUrl);
+        
+        if (ccfiData && ccfiData.length > 0) {
+          console.log(`Successfully fetched CCFI data from alternative source: ${altUrl}`);
+          break;
+        }
+      }
     }
     
     // Если данные получены, сохраняем их в базу данных
@@ -55,9 +204,8 @@ async function fetchCCFIFromPrimarySource() {
   try {
     // Отправка запроса на сайт Shanghai Shipping Exchange
     const response = await axios.get(CCFI_URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
+      headers: HTTP_CONFIG.HEADERS,
+      timeout: HTTP_CONFIG.TIMEOUT
     });
     
     // Проверка успешности запроса
@@ -142,13 +290,12 @@ async function fetchCCFIFromPrimarySource() {
 }
 
 // Функция для получения данных CCFI с альтернативного источника
-async function fetchCCFIFromAlternativeSource() {
+async function fetchCCFIFromAlternativeSource(url) {
   try {
     // Отправка запроса на альтернативный сайт
-    const response = await axios.get(CCFI_ALT_URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
+    const response = await axios.get(url, {
+      headers: HTTP_CONFIG.HEADERS,
+      timeout: HTTP_CONFIG.TIMEOUT
     });
     
     // Проверка успешности запроса
@@ -165,50 +312,96 @@ async function fetchCCFIFromAlternativeSource() {
     // Получение текущей даты
     const currentDate = new Date().toISOString().split('T')[0];
     
-    // Поиск статей с упоминанием CCFI
-    const articles = $('article');
-    
-    // Ищем в статьях упоминания индекса CCFI и его значения
-    articles.each((i, article) => {
-      const articleText = $(article).text();
+    // Определение типа источника и соответствующий парсинг
+    if (url.includes('macromicro')) {
+      // Парсинг данных с MacroMicro
+      console.log('Parsing MacroMicro format...');
       
-      // Ищем упоминание композитного индекса CCFI
-      const indexMatch = articleText.match(/CCFI.*?(\d+(\.\d+)?)/i);
+      // Извлечение значения индекса
+      const indexValue = $('.value').text().trim();
+      const currentIndex = parseFloat(indexValue.replace(',', ''));
       
-      if (indexMatch) {
-        const currentIndex = parseFloat(indexMatch[1]);
+      // Извлечение изменения индекса
+      const changeText = $('.change').text().trim();
+      const changeMatch = changeText.match(/([-+]?\d+(\.\d+)?)/);
+      const change = changeMatch ? parseFloat(changeMatch[1]) : 0;
+      
+      // Проверка валидности данных
+      if (!isNaN(currentIndex)) {
+        // Добавление данных в массив
+        ccfiData.push({
+          route: 'CCFI Composite Index',
+          currentIndex,
+          change,
+          indexDate: currentDate
+        });
         
-        // Ищем упоминание изменения индекса
-        const changeMatch = articleText.match(/(up|down).*?(\d+(\.\d+)?)/i);
-        let change = 0;
+        console.log(`Found CCFI data on MacroMicro: Index: ${currentIndex}, Change: ${change}`);
+      } else {
+        console.log(`Invalid CCFI data on MacroMicro: Index: ${indexValue}`);
+      }
+    } else if (url.includes('freightwaves') || url.includes('container-news') || url.includes('hellenicshippingnews')) {
+      // Поиск статей с упоминанием CCFI
+      const articles = $('article, .article, .post, .entry, .content');
+      console.log(`Found ${articles.length} articles on the page`);
+      
+      // Ищем в статьях упоминания индекса CCFI и его значения
+      articles.each((i, article) => {
+        const articleText = $(article).text();
         
-        if (changeMatch) {
-          change = parseFloat(changeMatch[2]);
-          if (changeMatch[1].toLowerCase() === 'down') {
-            change = -change;
+        // Ищем упоминание композитного индекса CCFI
+        const indexMatch = articleText.match(/CCFI.*?(\d+(\.\d+)?)/i);
+        
+        if (indexMatch) {
+          const currentIndex = parseFloat(indexMatch[1]);
+          
+          // Ищем упоминание изменения индекса
+          const changeMatch = articleText.match(/(up|down|increased|decreased|rose|fell).*?(\d+(\.\d+)?)/i);
+          let change = 0;
+          
+          if (changeMatch) {
+            change = parseFloat(changeMatch[2]);
+            const direction = changeMatch[1].toLowerCase();
+            
+            // Определяем направление изменения
+            if (direction.includes('down') || 
+                direction.includes('decreased') || 
+                direction.includes('fell')) {
+              change = -change;
+            }
+            
+            console.log(`Found change value in article: ${change} (${direction})`);
+          } else {
+            console.log('No change value found in article, using default: 0');
+          }
+          
+          // Добавление данных в массив, если индекс является числом
+          if (!isNaN(currentIndex)) {
+            console.log(`Adding data from article: Index: ${currentIndex}, Change: ${change}`);
+            
+            ccfiData.push({
+              route: 'CCFI Composite Index',
+              currentIndex,
+              change,
+              indexDate: currentDate
+            });
+            
+            console.log('Successfully added data from article');
+            
+            // Берем только первое найденное значение
+            return false;
+          } else {
+            console.log(`Invalid index value found in article: ${currentIndex}`);
           }
         }
-        
-        // Добавление данных в массив, если индекс является числом
-        if (!isNaN(currentIndex)) {
-          ccfiData.push({
-            route: 'CCFI Composite Index',
-            currentIndex,
-            change,
-            indexDate: currentDate
-          });
-          
-          // Берем только первое найденное значение
-          return false;
-        }
-      }
-    });
+      });
+    }
     
-    console.log(`Parsed CCFI data from alternative source: ${ccfiData.length} records`);
+    console.log(`Parsed CCFI data from alternative source ${url}: ${ccfiData.length} records`);
     
     return ccfiData;
   } catch (error) {
-    console.error('Error fetching CCFI data from alternative source:', error);
+    console.error(`Error fetching CCFI data from alternative source ${url}:`, error);
     return [];
   }
 }
@@ -255,7 +448,13 @@ async function fetchMockCCFIData() {
   ];
   
   // Сохранение моковых данных в базу данных
-  await saveCCFIData(mockData);
+  try {
+    await saveCCFIData(mockData);
+    console.log('Mock data successfully saved to database');
+  } catch (error) {
+    console.error('Error saving mock data to database:', error);
+    console.log('Continuing without saving mock data to database');
+  }
   
   return mockData;
 }
@@ -315,7 +514,21 @@ async function saveCCFIData(ccfiData) {
   }
 }
 
-// Функция для получения данных CCFI для расчета ставки фрахта
+/**
+ * Функция для получения данных CCFI для расчета ставки фрахта
+ * 
+ * Эта функция используется калькулятором фрахтовых ставок для получения
+ * текущего значения индекса CCFI, его изменения и даты.
+ * 
+ * Порядок получения данных:
+ * 1. Попытка получить данные из базы данных
+ * 2. Если данных нет в базе, попытка получить их через API
+ * 3. Если данные не удалось получить, использование моковых данных
+ * 
+ * @async
+ * @function getCCFIDataForCalculation
+ * @returns {Promise<Object>} Объект с данными CCFI для расчета
+ */
 async function getCCFIDataForCalculation() {
   try {
     console.log('Getting CCFI data for calculation...');
@@ -335,7 +548,8 @@ async function getCCFIDataForCalculation() {
       const data = result.rows[0];
       console.log('Found CCFI data in database:', data);
       
-      return {
+      // Используем адаптер для нормализации данных
+      const sourceData = {
         index: 'CCFI',
         value: data.current_index,
         change: data.change,
@@ -343,6 +557,9 @@ async function getCCFIDataForCalculation() {
         trend: data.change > 0 ? 'up' : 'down',
         source: 'database'
       };
+      
+      // Возвращаем нормализованные данные
+      return normalizeIndexData(sourceData);
     }
     
     // Если данных нет в базе, пытаемся получить их через API
@@ -356,7 +573,8 @@ async function getCCFIDataForCalculation() {
       if (compositeData) {
         console.log('Fetched CCFI data from API:', compositeData);
         
-        return {
+        // Используем адаптер для нормализации данных
+        const sourceData = {
           index: 'CCFI',
           value: compositeData.currentIndex,
           change: compositeData.change,
@@ -364,6 +582,9 @@ async function getCCFIDataForCalculation() {
           trend: compositeData.change > 0 ? 'up' : 'down',
           source: 'api'
         };
+        
+        // Возвращаем нормализованные данные
+        return normalizeIndexData(sourceData);
       }
     } catch (error) {
       console.error('Error fetching CCFI data from API:', error);
@@ -371,7 +592,9 @@ async function getCCFIDataForCalculation() {
     
     // Если данные не удалось получить, возвращаем моковые данные
     console.log('Failed to get CCFI data, using mock data');
-    return {
+    
+    // Используем адаптер для нормализации моковых данных
+    const mockData = {
       index: 'CCFI',
       value: 1850,
       change: 15,
@@ -379,11 +602,14 @@ async function getCCFIDataForCalculation() {
       trend: 'up',
       source: 'mock'
     };
+    
+    // Возвращаем нормализованные данные
+    return normalizeIndexData(mockData);
   } catch (error) {
     console.error('Error getting CCFI data for calculation:', error);
     
     // В случае ошибки возвращаем моковые данные
-    return {
+    const mockData = {
       index: 'CCFI',
       value: 1850,
       change: 15,
@@ -391,6 +617,9 @@ async function getCCFIDataForCalculation() {
       trend: 'up',
       source: 'mock'
     };
+    
+    // Возвращаем нормализованные данные
+    return normalizeIndexData(mockData);
   }
 }
 
@@ -475,7 +704,7 @@ function isWestCoast(portId) {
 module.exports = {
   fetchCCFIData,
   getCCFIDataForRoute,
-  getCCFIDataForCalculation  // Добавляем функцию в экспорт
+  getCCFIDataForCalculation
 };
 
 // Специальный хак для совместимости с ES модулями в server.js
@@ -484,6 +713,6 @@ if (typeof exports === 'object' && typeof module !== 'undefined') {
   exports.default = {
     fetchCCFIData,
     getCCFIDataForRoute,
-    getCCFIDataForCalculation  // Добавляем функцию в экспорт по умолчанию
+    getCCFIDataForCalculation
   };
 }
