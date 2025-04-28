@@ -164,265 +164,154 @@ function formatDate(date) {
   return new Date().toISOString().split('T')[0];
 }
 
+
 /**
  * Функция для получения данных CCFI с основного источника (Shanghai Shipping Exchange)
- * с улучшенным парсингом таблицы
+ * с улучшенным парсингом таблицы и обработкой ошибок, по аналогии с SCFI.
  * 
  * @async
  * @function fetchCCFIFromPrimarySource
- * @returns {Promise<Array>} Массив с данными CCFI
+ * @returns {Promise<Array>} Массив с данными CCFI для всех маршрутов
+ * @throws {Error} Если не удалось получить или распарсить данные после всех попыток
  */
 async function fetchCCFIFromPrimarySource() {
-  try {
-    console.log('Fetching CCFI data from primary source (Shanghai Shipping Exchange)...');
-    
-    // Отправка запроса на сайт Shanghai Shipping Exchange
-    const response = await axios.get(CCFI_URL, {
-      headers: HTTP_CONFIG.HEADERS,
-      timeout: HTTP_CONFIG.TIMEOUT
-    });
-    
-    // Проверка успешности запроса
-    if (response.status !== 200) {
-      throw new Error(`Failed to fetch CCFI data from primary source: ${response.status}`);
-    }
-    
-    // Парсинг HTML-страницы
-    const $ = cheerio.load(response.data);
-    
-    // Извлечение данных из таблицы
-    const ccfiData = [];
-    
-    // Ищем таблицу с данными CCFI
-    console.log('Looking for CCFI table in the response...');
-    
-    // Получаем текущую и предыдущую даты индекса
-    let currentDate = '';
-    let previousDate = '';
-    
-    // Ищем даты в заголовке таблицы
-    const headerText = $('table tr:first-child').text();
-    const dateMatches = headerText.match(/(\d{4}-\d{2}-\d{2})/g);
-    
-    if (dateMatches && dateMatches.length >= 2) {
-      previousDate = dateMatches[0];
-      currentDate = dateMatches[1];
-      console.log(`Found dates in table header: Previous=${previousDate}, Current=${currentDate}`);
-    } else {
-      // Если даты не найдены в заголовке, ищем их в других местах на странице
-      $('td:contains("Current Index")').each(function() {
-        const headerRow = $(this).closest('tr');
-        const headerText = headerRow.text();
-        const dateMatch = headerText.match(/(\d{4}-\d{2}-\d{2})/);
-        
-        if (dateMatch) {
-          currentDate = dateMatch[1];
-          console.log(`Found current date in table: ${currentDate}`);
+  console.log('Fetching CCFI data from primary source (Shanghai Shipping Exchange)...');
+  let retryCount = 0;
+  let lastError = null;
+
+  while (retryCount <= HTTP_CONFIG.MAX_RETRIES) {
+    try {
+      if (retryCount > 0) {
+        console.log(`Retry attempt ${retryCount}/${HTTP_CONFIG.MAX_RETRIES} after ${HTTP_CONFIG.RETRY_DELAY}ms delay`);
+        await new Promise(resolve => setTimeout(resolve, HTTP_CONFIG.RETRY_DELAY));
+      }
+
+      console.log(`Sending HTTP request to ${CCFI_URL}`);
+      const response = await axios.get(CCFI_URL, {
+        headers: HTTP_CONFIG.HEADERS,
+        timeout: HTTP_CONFIG.TIMEOUT
+      });
+
+      if (response.status !== 200) {
+        throw new Error(`Failed to fetch CCFI data from primary source: HTTP status ${response.status}`);
+      }
+
+      console.log(`Received response from ${CCFI_URL}, content length: ${response.data.length} bytes`);
+      console.log('Parsing HTML response...');
+      const $ = cheerio.load(response.data);
+      const ccfiData = [];
+      let currentDate = '';
+      let previousDate = '';
+
+      // Ищем даты в заголовках таблиц или тексте страницы
+      console.log('Extracting dates...');
+      $('th, td').each((i, el) => {
+        const text = $(el).text().trim();
+        if (text.includes('Current Index') && text.includes('-')) {
+          const dateMatch = text.match(/(\d{4}-\d{2}-\d{2})/);
+          if (dateMatch) currentDate = dateMatch[1];
+        } else if (text.includes('Previous Index') && text.includes('-')) {
+          const dateMatch = text.match(/(\d{4}-\d{2}-\d{2})/);
+          if (dateMatch) previousDate = dateMatch[1];
         }
       });
-      
-      $('td:contains("Previous Index")').each(function() {
-        const headerRow = $(this).closest('tr');
-        const headerText = headerRow.text();
-        const dateMatch = headerText.match(/(\d{4}-\d{2}-\d{2})/);
-        
-        if (dateMatch) {
-          previousDate = dateMatch[1];
-          console.log(`Found previous date in table: ${previousDate}`);
-        }
-      });
-      
-      // Если даты все еще не найдены, используем текущую дату
+
       if (!currentDate) {
         currentDate = new Date().toISOString().split('T')[0];
-        console.log(`Using current date as fallback: ${currentDate}`);
+        console.log(`Current date not found, using current date: ${currentDate}`);
       }
-    }
-    
-    // Ищем строку с композитным индексом CCFI
-    console.log('Looking for COMPOSITE INDEX row...');
-    
-    // Новый подход: ищем строку, содержащую "COMPOSITE INDEX"
-    $('tr').each(function() {
-      const rowText = $(this).text().trim();
-      
-      if (rowText.includes('COMPOSITE INDEX')) {
-        console.log('Found COMPOSITE INDEX row');
-        
-        const columns = $(this).find('td');
-        
-        // Проверяем, что строка содержит нужное количество колонок
-        if (columns.length >= 3) {
-          // Извлечение текущего значения индекса
-          const currentIndexText = $(columns[1]).text().trim();
-          const currentIndex = parseFloat(currentIndexText.replace(',', ''));
-          
-          // Извлечение предыдущего значения индекса (если доступно)
-          const previousIndexText = $(columns[0]).text().trim();
-          const previousIndex = parseFloat(previousIndexText.replace(',', ''));
-          
-          // Вычисление изменения индекса
-          let change = 0;
-          if (!isNaN(currentIndex) && !isNaN(previousIndex) && previousIndex !== 0) {
-            change = ((currentIndex - previousIndex) / previousIndex) * 100;
-          } else {
-            // Если не удалось вычислить изменение, пытаемся извлечь его из третьей колонки
-            const changeText = $(columns[2]).text().trim();
-            const changeMatch = changeText.match(/([-+]?\d+(\.\d+)?)/);
-            change = changeMatch ? parseFloat(changeMatch[1]) : 0;
-          }
-          
-          // Добавление данных в массив, если индекс является числом
-          if (!isNaN(currentIndex)) {
-            ccfiData.push({
-              route: 'CCFI Composite Index',
-              currentIndex,
-              change,
-              indexDate: currentDate
-            });
-            
-            console.log(`Added COMPOSITE INDEX data: Index=${currentIndex}, Change=${change}%, Date=${currentDate}`);
-          } else {
-            console.log(`Invalid COMPOSITE INDEX value: ${currentIndexText}`);
-          }
-        } else {
-          console.log(`COMPOSITE INDEX row has insufficient columns: ${columns.length}`);
-        }
+      if (!previousDate) {
+        const prevDate = new Date();
+        prevDate.setDate(prevDate.getDate() - 7);
+        previousDate = prevDate.toISOString().split('T')[0];
+        console.log(`Previous date not found, using date from week ago: ${previousDate}`);
       }
-    });
-    
-    // Если не нашли композитный индекс по тексту "COMPOSITE INDEX", 
-    // попробуем найти его в первой строке данных таблицы
-    if (ccfiData.length === 0) {
-      console.log('Trying alternative approach to find COMPOSITE INDEX...');
-      
-      // Ищем все таблицы на странице
+      console.log(`Using dates: Current date: ${currentDate}, Previous date: ${previousDate}`);
+
+      // Ищем таблицу с данными CCFI (более надежный способ, чем просто 4-я таблица)
+      console.log('Searching for CCFI data table...');
+      let ccfiTable = null;
       $('table').each(function() {
-        // Проверяем, содержит ли таблица данные CCFI
-        const tableText = $(this).text();
-        
-        if (tableText.includes('CCFI') || tableText.includes('China Containerized Freight Index')) {
-          console.log('Found table containing CCFI data');
-          
-          // Берем первую строку данных (после заголовка)
-          const dataRow = $(this).find('tr:eq(1)');
-          
-          if (dataRow.length > 0) {
-            const columns = dataRow.find('td');
-            
-            if (columns.length >= 3) {
-              // Извлечение текущего значения индекса
-              const currentIndexText = $(columns[1]).text().trim();
-              const currentIndex = parseFloat(currentIndexText.replace(',', ''));
-              
-              // Извлечение изменения индекса
-              const changeText = $(columns[2]).text().trim();
-              const changeMatch = changeText.match(/([-+]?\d+(\.\d+)?)/);
-              const change = changeMatch ? parseFloat(changeMatch[1]) : 0;
-              
-              // Добавление данных в массив, если индекс является числом
-              if (!isNaN(currentIndex)) {
-                ccfiData.push({
-                  route: 'CCFI Composite Index',
-                  currentIndex,
-                  change,
-                  indexDate: currentDate
-                });
-                
-                console.log(`Added CCFI data from first row: Index=${currentIndex}, Change=${change}%, Date=${currentDate}`);
-              } else {
-                console.log(`Invalid CCFI value from first row: ${currentIndexText}`);
-              }
-            } else {
-              console.log(`First data row has insufficient columns: ${columns.length}`);
-            }
-          } else {
-            console.log('No data rows found in the table');
-          }
+        const tableHtml = $(this).html();
+        // Ищем таблицу, содержащую специфичные для CCFI заголовки или маршруты
+        if (tableHtml.includes('Route') && tableHtml.includes('Current Index') && (tableHtml.includes('Europe') || tableHtml.includes('Mediterranean'))) {
+          ccfiTable = $(this);
+          console.log('Found potential CCFI data table.');
+          return false; // Прерываем цикл, так как нашли таблицу
         }
       });
-    }
-    
-    // Если все еще не нашли данные, ищем конкретные значения в тексте страницы
-    if (ccfiData.length === 0) {
-      console.log('Trying to extract CCFI data from page text...');
-      
-      // Получаем весь текст страницы
-      const pageText = $('body').text();
-      
-      // Ищем упоминание CCFI и числового значения рядом с ним
-      const indexMatch = pageText.match(/CCFI.*?(\d+(\.\d+)?)/i);
-      
-      if (indexMatch) {
-        const currentIndex = parseFloat(indexMatch[1]);
-        
-        // Ищем упоминание изменения индекса
-        const changeMatch = pageText.match(/(up|down|increased|decreased|rose|fell|[+-]).*?(\d+(\.\d+)?)/i);
-        let change = 0;
-        
-        if (changeMatch) {
-          change = parseFloat(changeMatch[2]);
-          const direction = changeMatch[1].toLowerCase();
-          
-          // Определяем направление изменения
-          if (direction.includes('down') || 
-              direction.includes('decreased') || 
-              direction.includes('fell') ||
-              direction === '-') {
-            change = -change;
-          }
-        }
-        
-        // Добавление данных в массив, если индекс является числом
-        if (!isNaN(currentIndex)) {
-          ccfiData.push({
-            route: 'CCFI Composite Index',
-            currentIndex,
-            change,
-            indexDate: currentDate
-          });
-          
-          console.log(`Added CCFI data from page text: Index=${currentIndex}, Change=${change}%, Date=${currentDate}`);
-        } else {
-          console.log(`Invalid CCFI value from page text: ${indexMatch[1]}`);
-        }
-      } else {
-        console.log('No CCFI data found in page text');
+
+      if (!ccfiTable) {
+        throw new Error('CCFI data table not found on the page.');
       }
-    }
-    
-    // Если данные все еще не найдены, используем жестко закодированные актуальные значения
-    if (ccfiData.length === 0) {
-      console.log('Using hardcoded current CCFI values as last resort');
-      
-      // Актуальные значения CCFI на 25.04.2025
-      ccfiData.push({
-        route: 'CCFI Composite Index',
-        currentIndex: 1122.4,
-        change: 1.0, // +1%
-        indexDate: '2025-04-25'
+
+      console.log('Parsing CCFI table rows...');
+      let rowCount = 0;
+      let validRowCount = 0;
+      ccfiTable.find('tr').each((i, row) => {
+        // Пропускаем заголовок
+        if (i === 0 || $(row).find('th').length > 0) {
+          console.log(`Skipping header row ${i}`);
+          return;
+        }
+
+        rowCount++;
+        const cells = $(row).find('td');
+
+        // Ожидаем как минимум 3 колонки: Route, Current Index, Change
+        if (cells.length >= 3) {
+          const route = $(cells[0]).text().trim();
+          const currentIndexText = $(cells[1]).text().trim();
+          const changeText = $(cells[2]).text().trim();
+
+          // Извлекаем числовые значения
+          const currentIndexValue = parseFloat(currentIndexText.replace(/,/g, ''));
+          const changeValueMatch = changeText.match(/([-+]?\d*\.?\d+)/);
+          const changeValue = changeValueMatch ? parseFloat(changeValueMatch[1]) : 0;
+
+          console.log(`Row ${rowCount}: Route: "${route}", Current Index: "${currentIndexText}", Change: "${changeText}"`);
+
+          if (route && !isNaN(currentIndexValue)) {
+            validRowCount++;
+            ccfiData.push({
+              route: route,
+              currentIndex: currentIndexValue,
+              change: changeValue,
+              indexDate: currentDate
+              // Добавляем предыдущую дату и индекс, если они есть и нужны
+              // previousIndex: ..., 
+              // previousDate: previousDate
+            });
+            console.log(`Added data for route: ${route}, current index: ${currentIndexValue}, change: ${changeValue}`);
+          } else {
+            console.log(`Skipping invalid row: Route: "${route}", Current Index: ${isNaN(currentIndexValue) ? 'NaN' : currentIndexValue}`);
+          }
+        } else {
+          console.log(`Skipping row ${rowCount} with insufficient columns (${cells.length} < 3)`);
+        }
       });
-      
-      console.log('Added hardcoded CCFI data: Index=1122.4, Change=1.0%, Date=2025-04-25');
+
+      console.log(`Processed ${rowCount} rows, found ${validRowCount} valid rows`);
+
+      if (ccfiData.length === 0) {
+        throw new Error('No valid CCFI data found in the table after parsing.');
+      }
+
+      console.log(`Successfully parsed ${ccfiData.length} CCFI records from primary source`);
+      return ccfiData; // Успешно получили и распарсили данные
+
+    } catch (error) {
+      lastError = error;
+      console.error(`Error fetching/parsing CCFI data from primary source (attempt ${retryCount + 1}/${HTTP_CONFIG.MAX_RETRIES + 1}):`, error.message);
+      retryCount++;
     }
-    
-    console.log(`Parsed CCFI data from primary source: ${ccfiData.length} records`);
-    
-    return ccfiData;
-  } catch (error) {
-    console.error('Error fetching CCFI data from primary source:', error);
-    
-    // В случае ошибки возвращаем актуальные значения CCFI
-    console.log('Using hardcoded current CCFI values due to error');
-    
-    return [{
-      route: 'CCFI Composite Index',
-      currentIndex: 1122.4,
-      change: 1.0, // +1%
-      indexDate: '2025-04-25'
-    }];
   }
+
+  // Если все попытки неудачны, выбрасываем последнюю ошибку
+  console.error('All retry attempts failed for primary source.');
+  throw lastError || new Error('Failed to fetch CCFI data from primary source after multiple attempts');
 }
+
 
 // Функция для получения данных CCFI с альтернативного источника
 async function fetchCCFIFromAlternativeSource(url) {
@@ -566,7 +455,7 @@ async function fetchMockCCFIData() {
     },
     {
       route: 'CCFI Mediterranean',
-      currentIndex: 1850.56,
+      currentIndex: 1122.4, // Исправлено с 1850.56
       change: 2.1,
       indexDate: currentDate
     },
