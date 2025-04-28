@@ -842,7 +842,11 @@ async function getSCFIDataForCalculation() {
       LIMIT 1
     `;
     
+    console.log(`[DB LOG] Executing query: ${query}`);
+    console.log(`[DB LOG] Table name: ${DB_CONFIG.TABLE_NAME}`);
+    
     const result = await pool.query(query);
+    console.log(`[DB LOG] Query executed successfully. Rows returned: ${result.rows.length}`);
     
     // Если данные найдены в базе, возвращаем их
     if (result.rows.length > 0) {
@@ -916,6 +920,16 @@ async function getSCFIDataForCalculation() {
     };
   } catch (error) {
     console.error('Error getting SCFI data for calculation:', error);
+    console.error('[DB ERROR] Error details:', error.message);
+    if (error.code) {
+      console.error(`[DB ERROR] Error code: ${error.code}`);
+    }
+    if (error.position) {
+      console.error(`[DB ERROR] Error position: ${error.position}`);
+    }
+    if (error.table) {
+      console.error(`[DB ERROR] Error table: ${error.table}`);
+    }
     console.error('Stack trace:', error.stack);
     
     // В случае ошибки возвращаем моковые данные
