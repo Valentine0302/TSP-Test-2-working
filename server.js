@@ -23,7 +23,7 @@ import ctsScraper from './cts_scraper.js';
 // Импорт модулей анализа и расчета
 import seasonalityAnalyzer from './seasonality_analyzer.js';
 import fuelSurchargeCalculator from './fuel_surcharge_calculator.js';
-import enhancedFreightCalculator from './freight_calculator.js';
+import enhancedFreightCalculator from './freight_calculator_enhanced.js';
 
 // Загрузка переменных окружения
 dotenv.config();
@@ -121,6 +121,40 @@ app.post('/api/calculate', async (req, res) => {
   } catch (error) {
     console.error('Error calculating freight rate:', error);
     res.status(500).json({ error: 'Failed to calculate freight rate' });
+  }
+});
+
+// Отладочный маршрут для пошагового расчета фрахтовой ставки
+app.post('/api/debug/calculate', async (req, res) => {
+  try {
+    const { originPort, destinationPort, containerType, weight, email } = req.body;
+    
+    // Проверка наличия всех необходимых параметров
+    if (!originPort || !destinationPort || !containerType) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+    
+    console.log(`Debug calculation request: ${originPort} -> ${destinationPort}, ${containerType}, weight: ${weight || 20000}`);
+    
+    // Расчет фрахтовой ставки с включенным режимом отладки
+    const result = await enhancedFreightCalculator.calculateFreightRate(
+      originPort,
+      destinationPort,
+      containerType,
+      weight || 20000,
+      true // включаем режим отладки
+    );
+    
+    console.log(`Debug calculation completed with ${result.debugLog?.length || 0} log entries`);
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Error in debug calculation:', error);
+    res.status(500).json({ 
+      error: 'Failed to calculate freight rate in debug mode',
+      details: error.message,
+      stack: error.stack
+    });
   }
 });
 
@@ -512,15 +546,16 @@ app.post('/api/admin/ports', async (req, res) => {
     }
     
     // Проверка уникальности кода порта
-    const checkResult = await pool.query('SELECT * FROM ports WHERE code = $1', [code]);
+    const checkResult = await pool.query('SELECT * FROM ports WHERE id = $1', [code]);
+    
     if (checkResult.rows.length > 0) {
       return res.status(400).json({ error: 'Port with this code already exists' });
     }
     
     // Добавление нового порта
     const result = await pool.query(
-      'INSERT INTO ports (name, code, region, latitude, longitude) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [name, code, region, latitude || null, longitude || null]
+      'INSERT INTO ports (id, name, region, latitude, longitude) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [code, name, region, latitude || null, longitude || null]
     );
     
     res.status(201).json(result.rows[0]);
@@ -534,28 +569,20 @@ app.post('/api/admin/ports', async (req, res) => {
 app.put('/api/admin/ports/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, code, region, latitude, longitude } = req.body;
+    const { name, region, latitude, longitude } = req.body;
     
-    // Проверка наличия всех необходимых параметров
-    if (!name || !code || !region) {
-      return res.status(400).json({ error: 'Missing required parameters' });
-    }
+    // Проверка наличия порта
+    const checkResult = await pool.query('SELECT * FROM ports WHERE id = $1', [id]);
     
-    // Проверка уникальности кода порта (исключая текущий порт)
-    const checkResult = await pool.query('SELECT * FROM ports WHERE code = $1 AND id != $2', [code, id]);
-    if (checkResult.rows.length > 0) {
-      return res.status(400).json({ error: 'Another port with this code already exists' });
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Port not found' });
     }
     
     // Обновление информации о порте
     const result = await pool.query(
-      'UPDATE ports SET name = $1, code = $2, region = $3, latitude = $4, longitude = $5 WHERE id = $6 RETURNING *',
-      [name, code, region, latitude || null, longitude || null, id]
+      'UPDATE ports SET name = $1, region = $2, latitude = $3, longitude = $4 WHERE id = $5 RETURNING *',
+      [name, region, latitude, longitude, id]
     );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Port not found' });
-    }
     
     res.json(result.rows[0]);
   } catch (error) {
@@ -569,27 +596,152 @@ app.delete('/api/admin/ports/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Проверка использования порта в истории расчетов
-    const checkResult = await pool.query(
+    // Проверка наличия порта
+    const checkResult = await pool.query('SELECT * FROM ports WHERE id = $1', [id]);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Port not found' });
+    }
+    
+    // Проверка использования порта в расчетах
+    const usageCheck = await pool.query(
       'SELECT COUNT(*) FROM request_history WHERE origin_port_id = $1 OR destination_port_id = $1',
       [id]
     );
     
-    if (parseInt(checkResult.rows[0].count) > 0) {
-      return res.status(400).json({ error: 'Cannot delete port that is used in calculation history' });
+    if (parseInt(usageCheck.rows[0].count) > 0) {
+      return res.status(400).json({ 
+        error: 'Cannot delete port that is used in calculations',
+        count: parseInt(usageCheck.rows[0].count)
+      });
     }
     
     // Удаление порта
-    const result = await pool.query('DELETE FROM ports WHERE id = $1 RETURNING *', [id]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Port not found' });
-    }
+    await pool.query('DELETE FROM ports WHERE id = $1', [id]);
     
     res.json({ success: true, message: 'Port deleted successfully' });
   } catch (error) {
     console.error('Error deleting port:', error);
     res.status(500).json({ error: 'Failed to delete port' });
+  }
+});
+
+// Маршрут для получения списка типов контейнеров (административный)
+app.get('/api/admin/container-types', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM container_types ORDER BY name');
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching container types for admin:', error);
+    res.status(500).json({ error: 'Failed to fetch container types' });
+  }
+});
+
+// Маршрут для получения информации о конкретном типе контейнера
+app.get('/api/admin/container-types/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('SELECT * FROM container_types WHERE id = $1', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Container type not found' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error fetching container type details:', error);
+    res.status(500).json({ error: 'Failed to fetch container type details' });
+  }
+});
+
+// Маршрут для добавления нового типа контейнера
+app.post('/api/admin/container-types', async (req, res) => {
+  try {
+    const { id, name, length, width, height, maxWeight, teu } = req.body;
+    
+    // Проверка наличия всех необходимых параметров
+    if (!id || !name) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+    
+    // Проверка уникальности кода типа контейнера
+    const checkResult = await pool.query('SELECT * FROM container_types WHERE id = $1', [id]);
+    
+    if (checkResult.rows.length > 0) {
+      return res.status(400).json({ error: 'Container type with this code already exists' });
+    }
+    
+    // Добавление нового типа контейнера
+    const result = await pool.query(
+      'INSERT INTO container_types (id, name, length, width, height, max_weight, teu) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [id, name, length || null, width || null, height || null, maxWeight || null, teu || null]
+    );
+    
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error adding new container type:', error);
+    res.status(500).json({ error: 'Failed to add new container type' });
+  }
+});
+
+// Маршрут для обновления информации о типе контейнера
+app.put('/api/admin/container-types/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, length, width, height, maxWeight, teu } = req.body;
+    
+    // Проверка наличия типа контейнера
+    const checkResult = await pool.query('SELECT * FROM container_types WHERE id = $1', [id]);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Container type not found' });
+    }
+    
+    // Обновление информации о типе контейнера
+    const result = await pool.query(
+      'UPDATE container_types SET name = $1, length = $2, width = $3, height = $4, max_weight = $5, teu = $6 WHERE id = $7 RETURNING *',
+      [name, length, width, height, maxWeight, teu, id]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating container type:', error);
+    res.status(500).json({ error: 'Failed to update container type' });
+  }
+});
+
+// Маршрут для удаления типа контейнера
+app.delete('/api/admin/container-types/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Проверка наличия типа контейнера
+    const checkResult = await pool.query('SELECT * FROM container_types WHERE id = $1', [id]);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Container type not found' });
+    }
+    
+    // Проверка использования типа контейнера в расчетах
+    const usageCheck = await pool.query(
+      'SELECT COUNT(*) FROM request_history WHERE container_type = $1',
+      [id]
+    );
+    
+    if (parseInt(usageCheck.rows[0].count) > 0) {
+      return res.status(400).json({ 
+        error: 'Cannot delete container type that is used in calculations',
+        count: parseInt(usageCheck.rows[0].count)
+      });
+    }
+    
+    // Удаление типа контейнера
+    await pool.query('DELETE FROM container_types WHERE id = $1', [id]);
+    
+    res.json({ success: true, message: 'Container type deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting container type:', error);
+    res.status(500).json({ error: 'Failed to delete container type' });
   }
 });
 
@@ -683,129 +835,3 @@ app.get('/api/admin/settings', async (req, res) => {
       settings[row.key] = {
         value: row.value,
         description: row.description,
-        updatedAt: row.updated_at
-      };
-    });
-    
-    res.json(settings);
-  } catch (error) {
-    console.error('Error fetching settings:', error);
-    res.status(500).json({ error: 'Failed to fetch settings' });
-  }
-});
-
-// Маршрут для обновления настроек системы
-app.post('/api/admin/settings', async (req, res) => {
-  try {
-    const settings = req.body;
-    
-    // Проверка формата данных
-    if (!settings || typeof settings !== 'object') {
-      return res.status(400).json({ error: 'Invalid settings format' });
-    }
-    
-    const results = {};
-    
-    // Обновление каждой настройки
-    for (const [key, value] of Object.entries(settings)) {
-      try {
-        const result = await pool.query(
-          'UPDATE settings SET value = $1, updated_at = NOW() WHERE key = $2 RETURNING *',
-          [value.toString(), key]
-        );
-        
-        if (result.rows.length === 0) {
-          // Если настройка не существует, добавляем ее
-          const insertResult = await pool.query(
-            'INSERT INTO settings (key, value, description) VALUES ($1, $2, $3) RETURNING *',
-            [key, value.toString(), `Custom setting: ${key}`]
-          );
-          
-          results[key] = { success: true, action: 'inserted' };
-        } else {
-          results[key] = { success: true, action: 'updated' };
-        }
-      } catch (error) {
-        console.error(`Error updating setting ${key}:`, error);
-        results[key] = { success: false, error: error.message };
-      }
-    }
-    
-    res.json(results);
-  } catch (error) {
-    console.error('Error updating settings:', error);
-    res.status(500).json({ error: 'Failed to update settings' });
-  }
-});
-
-// Маршрут для административной страницы
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
-});
-
-// Функция для сохранения запроса в историю
-async function saveRequestToHistory(originPort, destinationPort, containerType, weight, rate, email) {
-  try {
-    // Проверка существования таблицы request_history
-    const tableCheckResult = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'request_history'
-      )
-    `);
-    
-    // Если таблица не существует, создаем ее
-    if (!tableCheckResult.rows[0].exists) {
-      await pool.query(`
-        CREATE TABLE request_history (
-          id SERIAL PRIMARY KEY,
-          origin_port_id VARCHAR(10) NOT NULL,
-          destination_port_id VARCHAR(10) NOT NULL,
-          container_type VARCHAR(10) NOT NULL,
-          weight INTEGER NOT NULL,
-          rate NUMERIC NOT NULL,
-          email VARCHAR(255) NOT NULL,
-          request_date TIMESTAMP NOT NULL DEFAULT NOW(),
-          FOREIGN KEY (origin_port_id) REFERENCES ports(id),
-          FOREIGN KEY (destination_port_id) REFERENCES ports(id)
-        )
-      `);
-    }
-    
-    // Сохранение запроса в историю
-    await pool.query(
-      `INSERT INTO request_history 
-       (origin_port_id, destination_port_id, container_type, weight, rate, email) 
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        originPort,
-        destinationPort,
-        containerType,
-        weight,
-        rate,
-        email
-      ]
-    );
-    
-    console.log('Request saved to history');
-  } catch (error) {
-    console.error('Error saving request to history:', error);
-    // Ошибка сохранения истории не должна прерывать основной процесс
-  }
-}
-
-// Функция для валидации email
-function validateEmail(email) {
-  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return re.test(email);
-}
-
-// Запуск сервера
-app.listen(PORT, async () => {
-  console.log(`Server running on port ${PORT}`);
-  
-  // Инициализация системы при запуске сервера
-  await initializeSystem();
-});
-
-export default app;
