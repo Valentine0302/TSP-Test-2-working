@@ -835,3 +835,129 @@ app.get('/api/admin/settings', async (req, res) => {
       settings[row.key] = {
         value: row.value,
         description: row.description,
+        updatedAt: row.updated_at
+      };
+    });
+    
+    res.json(settings);
+  } catch (error) {
+    console.error('Error fetching settings:', error);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+// Маршрут для обновления настроек системы
+app.post('/api/admin/settings', async (req, res) => {
+  try {
+    const settings = req.body;
+    
+    // Проверка формата данных
+    if (!settings || typeof settings !== 'object') {
+      return res.status(400).json({ error: 'Invalid settings format' });
+    }
+    
+    const results = {};
+    
+    // Обновление каждой настройки
+    for (const [key, value] of Object.entries(settings)) {
+      try {
+        const result = await pool.query(
+          'UPDATE settings SET value = $1, updated_at = NOW() WHERE key = $2 RETURNING *',
+          [value.toString(), key]
+        );
+        
+        if (result.rows.length === 0) {
+          // Если настройка не существует, добавляем ее
+          const insertResult = await pool.query(
+            'INSERT INTO settings (key, value, description) VALUES ($1, $2, $3) RETURNING *',
+            [key, value.toString(), `Custom setting: ${key}`]
+          );
+          
+          results[key] = { success: true, action: 'inserted' };
+        } else {
+          results[key] = { success: true, action: 'updated' };
+        }
+      } catch (error) {
+        console.error(`Error updating setting ${key}:`, error);
+        results[key] = { success: false, error: error.message };
+      }
+    }
+    
+    res.json(results);
+  } catch (error) {
+    console.error('Error updating settings:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Маршрут для административной страницы
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
+// Функция для сохранения запроса в историю
+async function saveRequestToHistory(originPort, destinationPort, containerType, weight, rate, email) {
+  try {
+    // Проверка существования таблицы request_history
+    const tableCheckResult = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'request_history'
+      )
+    `);
+    
+    // Если таблица не существует, создаем ее
+    if (!tableCheckResult.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE request_history (
+          id SERIAL PRIMARY KEY,
+          origin_port_id VARCHAR(10) NOT NULL,
+          destination_port_id VARCHAR(10) NOT NULL,
+          container_type VARCHAR(10) NOT NULL,
+          weight INTEGER NOT NULL,
+          rate NUMERIC NOT NULL,
+          email VARCHAR(255) NOT NULL,
+          request_date TIMESTAMP NOT NULL DEFAULT NOW(),
+          FOREIGN KEY (origin_port_id) REFERENCES ports(id),
+          FOREIGN KEY (destination_port_id) REFERENCES ports(id)
+        )
+      `);
+    }
+    
+    // Сохранение запроса в историю
+    await pool.query(
+      `INSERT INTO request_history 
+       (origin_port_id, destination_port_id, container_type, weight, rate, email) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        originPort,
+        destinationPort,
+        containerType,
+        weight,
+        rate,
+        email
+      ]
+    );
+    
+    console.log('Request saved to history');
+  } catch (error) {
+    console.error('Error saving request to history:', error);
+    // Ошибка сохранения истории не должна прерывать основной процесс
+  }
+}
+
+// Функция для валидации email
+function validateEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email);
+}
+
+// Запуск сервера
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
+  
+  // Инициализация системы при запуске сервера
+  await initializeSystem();
+});
+
+export default app;
