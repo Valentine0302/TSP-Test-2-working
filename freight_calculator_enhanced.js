@@ -172,19 +172,25 @@ async function calculateFreightRate(originPortId, destinationPortId, containerTy
 
     const indexResults = await Promise.allSettled(Object.values(indexPromises));
     const indexData = {};
-    Object.keys(indexPromises).forEach((key, i) => {
-      if (indexResults[i].status === 'fulfilled' && indexResults[i].value) {
-        indexData[key] = indexResults[i].value;
+    const sourceKeys = Object.keys(indexPromises);
+
+    for (let i = 0; i < sourceKeys.length; i++) {
+      const key = sourceKeys[i];
+      const result = indexResults[i];
+
+      if (result.status === 'fulfilled' && result.value) {
+        indexData[key] = result.value;
         fetchStep.sources[key] = { status: 'Success', value: indexData[key] };
       } else {
         // Primary fetch failed, try web search fallback
-        console.log(`[Fallback] Primary fetch for ${key} failed. Reason: ${indexResults[i].reason?.message || 'No data returned'}. Trying web search...`);
+        console.log(`[Fallback] Primary fetch for ${key} failed. Reason: ${result.reason?.message || 'No data returned'}. Trying web search...`);
         try {
+          // Use await inside the async loop
           const webSearchResult = await webSearchIndices.searchIndexValue(key);
           if (webSearchResult && webSearchResult.value) {
-            indexData[key] = { 
-              current_index: webSearchResult.value, 
-              index_date: webSearchResult.date, 
+            indexData[key] = {
+              current_index: webSearchResult.value,
+              index_date: webSearchResult.date,
               source: 'web_search' // Mark data as coming from web search
             };
             fetchStep.sources[key] = { status: 'Success (Web Search Fallback)', value: indexData[key] };
@@ -200,7 +206,7 @@ async function calculateFreightRate(originPortId, destinationPortId, containerTy
           console.error(`[Fallback] Error during web search for ${key}:`, webSearchError);
         }
       }
-    });
+    }
     if (debugMode) debugLog.push(fetchStep);
 
     // 2. Расчет базовой ставки на основе основных индексов
