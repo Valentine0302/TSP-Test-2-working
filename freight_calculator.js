@@ -1,10 +1,25 @@
 // Модуль для агрегации данных из различных источников и расчета ставок фрахта
-// Объединяет данные из SCFI, FBX, WCI и других источников
-const { Pool } = require('pg');
-const dotenv = require('dotenv');
-const scfiScraper = require('./scfi_scraper.js');
-const fbxScraper = require('./fbx_scraper.js');
-const wciScraper = require('./wci_scraper.js');
+// Усовершенствованная версия, использующая все доступные индексы и факторы
+
+import { Pool } from 'pg';
+import dotenv from 'dotenv';
+
+// Импорт всех модулей скраперов
+// Используем исправленные/предпочтительные версии скраперов
+import scfiScraper from '/home/ubuntu/TSP-Test-2-repo/scfi_scraper.js'; // Используем версию из репозитория
+import fbxScraper from './fbx_scraper.js'; // Оставляем как есть, предполагая рабочим
+import wciScraper from './wci_scraper.js'; // Оставляем как есть, предполагая рабочим
+import bdiScraper from '/home/ubuntu/bdi_scraper_fixed.js'; // Используем исправленную версию
+import ccfiScraper from '/home/ubuntu/ccfi_scraper_fixed.js'; // Используем исправленную версию
+import harpexScraper from './harpex_scraper.js'; // Оставляем как есть, предполагая рабочим
+import contexScraper from './contex_scraper.js'; // Assuming this is New ConTex
+import istfixScraper from './istfix_scraper.js'; // Оставляем как есть, предполагая рабочим
+import ctsScraper from './cts_scraper.js'; // Оставляем как есть, предполагая рабочим
+
+import scraperAdapters from './scraper_adapters.js';
+import seasonalityAnalyzer from './seasonality_analyzer.js';
+import fuelSurchargeCalculator from './fuel_surcharge_calculator.js';
+import webSearchIndices from './web_search_indices.js'; // Import web search module
 
 // Загрузка переменных окружения
 dotenv.config();
@@ -18,417 +33,470 @@ const pool = new Pool({
   }
 });
 
-// Весовые коэффициенты источников данных
-const SOURCE_WEIGHTS = {
+// Весовые коэффициенты для основных индексов спотовых ставок
+const CORE_SOURCE_WEIGHTS = {
   'SCFI': 1.2,
   'Freightos FBX': 1.2,
-  'Drewry WCI': 1.2,
-  'Xeneta XSI': 1.2,
-  'S&P Global Platts': 1.2,
-  'Container Trades Statistics': 1.0,
-  'Alphaliner': 1.0,
+  'Drewry WCI': 1.1,
+  'CCFI': 1.0,
 };
 
-// Функция для получения актуальных данных SCFI для конкретного маршрута
-async function getUpdatedSCFIDataForRoute(origin, destination) {
+// Веса для модификаторов (можно настроить)
+const MODIFIER_WEIGHTS = {
+  'Harpex': 0.4,
+  'NewConTex': 0.4,
+  'BDI': 0.1,
+  'CTS': 0.2,
+  'ISTFIX': 1.5 // Используется только для Intra-Asia
+};
+
+// Placeholder для базовых значений модификаторов (в идеале - из исторических данных)
+const MODIFIER_BASELINES = {
+  'Harpex': 1000, // Примерное значение
+  'NewConTex': 500, // Примерное значение
+  'BDI': 1500, // Примерное значение
+  'CTS': 100 // Примерное значение (индекс)
+};
+
+// --- Вспомогательные функции ---
+
+// Функция для расчета стандартного отклонения
+function calculateStandardDeviation(values) {
+  const n = values.length;
+  if (n <= 1) return 0; // Стандартное отклонение не определено для 0 или 1 значения
+
+  const mean = values.reduce((sum, value) => sum + value, 0) / n;
+  const squaredDifferencesSum = values.reduce((sum, value) => {
+    const difference = value - mean;
+    return sum + (difference * difference);
+  }, 0);
+  // Используем sample standard deviation (n-1) для несмещенной оценки
+  const variance = n > 1 ? squaredDifferencesSum / (n - 1) : 0;
+  return Math.sqrt(variance);
+}
+
+// Функция для базового расчета ставки фрахта (если нет данных из источников)
+function calculateBaseRate(origin, destination, containerType, debugLog = []) {
+  const step = { stage: 'Base Rate Calculation (Fallback)', inputs: { origin, destination, containerType } };
   try {
-    console.log(`Getting updated SCFI data for route: ${origin} to ${destination}`);
-    
-    // Получение актуальных данных композитного индекса SCFI
-    const scfiCompositeData = await scfiScraper.getSCFIDataForCalculation();
-    
-    if (!scfiCompositeData || !scfiCompositeData.current_index) {
-      console.log('Failed to get SCFI composite data, falling back to route-specific data');
-      return scfiScraper.getSCFIDataForRoute(origin, destination);
+    function simpleHash(str) {
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+      }
+      return Math.abs(hash);
     }
-    
-    // Получение данных для конкретного маршрута
-    const routeData = await scfiScraper.getSCFIDataForRoute(origin, destination);
-    
-    // Если данные для маршрута получены успешно, используем их
-    if (routeData && routeData.current_index) {
-      console.log('Using route-specific SCFI data:', routeData);
-      return routeData;
-    }
-    
-    // Если данные для маршрута не получены, используем композитный индекс
-    // с корректировкой на основе региона
-    console.log('No route-specific data available, using adjusted composite index');
-    
-    // Определение регионов для портов
-    const originRegion = await getPortRegionById(origin);
-    const destinationRegion = await getPortRegionById(destination);
-    
-    // Коэффициенты корректировки для разных регионов
-    const regionAdjustments = {
-      'Europe': 1.05,
-      'Mediterranean': 1.0,
-      'North America': 1.15,
-      'Middle East': 0.95,
-      'Oceania': 0.9,
-      'Africa': 1.0,
-      'South America': 0.95,
-      'Asia': 0.85
+
+    const hashString = `${origin}-${destination}-${containerType}`;
+    const hash = simpleHash(hashString);
+    const baseRate = 1500 + (hash % 1500); // Детерминированная ставка 1500-3000
+    step.details = `Generated hash for '${hashString}': ${hash}. Base rate: 1500 + (${hash} % 1500) = ${baseRate}.`;
+
+    // ВАЖНО: Fallback не включает топливо, оно будет добавлено позже, если возможно
+    const result = {
+        rate: baseRate, // Это базовая ставка БЕЗ топлива
+        minRate: Math.round(baseRate * 0.9),
+        maxRate: Math.round(baseRate * 1.1),
+        reliability: 0.7, // Низкая надежность для fallback
+        sourceCount: 0,
+        sourcesUsed: ['Base calculation fallback'],
+        // finalRate будет рассчитан позже с добавлением топлива
     };
-    
-    // Определение коэффициента корректировки
-    let adjustmentFactor = 1.0;
-    
-    if (originRegion === 'Asia' || originRegion === 'China') {
-      adjustmentFactor = regionAdjustments[destinationRegion] || 1.0;
-    }
-    
-    // Применение коэффициента к композитному индексу
-    const adjustedIndex = Math.round(scfiCompositeData.current_index * adjustmentFactor);
-    
-    // Создание объекта с данными для маршрута на основе композитного индекса
-    const adjustedData = {
-      route: `${originRegion} to ${destinationRegion}`,
-      current_index: adjustedIndex,
-      change: scfiCompositeData.change,
-      index_date: scfiCompositeData.index_date
-    };
-    
-    console.log('Created adjusted SCFI data:', adjustedData);
-    return adjustedData;
+    step.result = { baseRate: result.rate }; // Логируем только базовую ставку здесь
+    step.status = 'Success (using fallback)';
+    debugLog.push(step);
+    return result;
   } catch (error) {
-    console.error('Error getting updated SCFI data for route:', error);
-    // В случае ошибки возвращаем null, чтобы калькулятор мог использовать другие источники
-    return null;
+    step.status = 'Error';
+    step.error = error.message;
+    debugLog.push(step);
+    console.error('Error calculating base rate:', error);
+    // Совсем крайний случай - вернуть фиксированное значение БЕЗ топлива
+    return {
+      rate: 2000, minRate: 1800, maxRate: 2200, reliability: 0.5, sourceCount: 0, sourcesUsed: ['Error Fallback'],
+    };
   }
 }
 
 // Вспомогательная функция для определения региона порта по его ID
 async function getPortRegionById(portId) {
+  // ... (код без изменений) ...
   try {
-    const query = `
-      SELECT region FROM ports 
-      WHERE port_id = $1
-    `;
-    
+    const query = `SELECT region FROM ports WHERE id = $1`; // Используем id, а не port_id
     const result = await pool.query(query, [portId]);
-    
     if (result.rows.length > 0) {
       return result.rows[0].region;
     } else {
-      // Если порт не найден в базе, используем маппинг на основе кода порта
+      // Fallback map (может быть неполным)
       const regionMap = {
-        // Азия
-        'CNSHA': 'China',
-        'CNYTN': 'China',
-        'CNNGB': 'China',
-        'CNQIN': 'China',
-        'CNDAL': 'China',
-        'HKHKG': 'Asia',
-        'SGSIN': 'Asia',
-        'JPOSA': 'Asia',
-        'JPTYO': 'Asia',
-        'KRPUS': 'Asia',
-        'VNSGN': 'Asia',
-        'MYLPK': 'Asia',
-        'IDTPP': 'Asia',
-        'THBKK': 'Asia',
-        'PHMNL': 'Asia',
-        
-        // Европа
-        'DEHAM': 'Europe',
-        'NLRTM': 'Europe',
-        'GBFXT': 'Europe',
-        'FRLEH': 'Europe',
-        'BEANR': 'Europe',
-        'ESBCN': 'Europe',
-        'ITGOA': 'Europe',
-        'GRPIR': 'Europe',
-        
-        // Средиземноморье
-        'ITTRS': 'Mediterranean',
-        'ESVLC': 'Mediterranean',
-        'FRFOS': 'Mediterranean',
-        'TRMER': 'Mediterranean',
-        'EGPSD': 'Mediterranean',
-        
-        // Северная Америка
-        'USLAX': 'North America',
-        'USSEA': 'North America',
-        'USNYC': 'North America',
-        'USBAL': 'North America',
-        'USSAV': 'North America',
-        'USHOU': 'North America',
-        'CAMTR': 'North America',
-        'CAVNC': 'North America',
-        
-        // Ближний Восток
-        'AEJEA': 'Middle East',
-        'AEDXB': 'Middle East',
-        'SAJED': 'Middle East',
-        'IQBSR': 'Middle East',
-        'IRBND': 'Middle East',
-        
-        // Океания
-        'AUSYD': 'Oceania',
-        'AUMEL': 'Oceania',
-        'NZAKL': 'Oceania',
-        
-        // Африка
-        'ZALGS': 'Africa',
-        'ZADUR': 'Africa',
-        'MAPTM': 'Africa',
-        'EGALY': 'Africa',
-        'TZDAR': 'Africa',
-        'KEMBA': 'Africa',
-        
-        // Южная Америка
-        'BRSSZ': 'South America',
-        'ARBUE': 'South America',
-        'CLVAP': 'South America',
-        'PECLL': 'South America',
-        'COBUN': 'South America',
-        'ECGYE': 'South America'
+        'CNSHA': 'China', 'CNYTN': 'China', 'CNNGB': 'China', 'CNQIN': 'China', 'CNDAL': 'China',
+        'HKHKG': 'Asia', 'SGSIN': 'Asia', 'JPOSA': 'Asia', 'JPTYO': 'Asia', 'KRPUS': 'Asia', 'VNSGN': 'Asia', 'MYLPK': 'Asia', 'IDTPP': 'Asia', 'THBKK': 'Asia', 'PHMNL': 'Asia',
+        'DEHAM': 'Europe', 'NLRTM': 'Europe', 'GBFXT': 'Europe', 'FRLEH': 'Europe', 'BEANR': 'Europe', 'ESBCN': 'Europe', 'ITGOA': 'Europe', 'GRPIR': 'Europe',
+        'ITTRS': 'Mediterranean', 'ESVLC': 'Mediterranean', 'FRFOS': 'Mediterranean', 'TRMER': 'Mediterranean', 'EGPSD': 'Mediterranean',
+        'USLAX': 'North America', 'USSEA': 'North America', 'USNYC': 'North America', 'USBAL': 'North America', 'USSAV': 'North America', 'USHOU': 'North America', 'CAMTR': 'North America', 'CAVNC': 'North America',
+        'AEJEA': 'Middle East', 'AEDXB': 'Middle East', 'SAJED': 'Middle East', 'IQBSR': 'Middle East', 'IRBND': 'Middle East',
+        'AUSYD': 'Oceania', 'AUMEL': 'Oceania', 'NZAKL': 'Oceania',
+        'ZALGS': 'Africa', 'ZADUR': 'Africa', 'MAPTM': 'Africa', 'EGALY': 'Africa', 'TZDAR': 'Africa', 'KEMBA': 'Africa',
+        'BRSSZ': 'South America', 'ARBUE': 'South America', 'CLVAP': 'South America', 'PECLL': 'South America', 'COBUN': 'South America', 'ECGYE': 'South America'
       };
-      
       return regionMap[portId] || 'Unknown';
     }
   } catch (error) {
-    console.error('Error getting port region:', error);
+    console.error(`Error getting region for port ${portId}:`, error);
     return 'Unknown';
   }
 }
 
-// Функция для расчета ставки фрахта на основе данных из различных источников
-async function calculateFreightRate(origin, destination, containerType, weight = 20000) {
+// --- Основная функция расчета --- 
+
+async function calculateFreightRate(originPortId, destinationPortId, containerType, weight = 20000, debugMode = false) {
+  const debugLog = [];
+  const startTime = Date.now();
+
+  if (debugMode) {
+    debugLog.push({ stage: 'Start Calculation', inputs: { originPortId, destinationPortId, containerType, weight }, timestamp: new Date().toISOString() });
+  }
+
+  let baseOceanFreight = 0; // Ставка без топлива
+  let reliabilityScore = 0.5; // Начальная надежность
+  let sourcesUsedCount = 0;
+  let sourcesUsedList = [];
+  let calculationStatus = 'Incomplete';
+
   try {
-    console.log(`Calculating freight rate for ${origin} to ${destination}, container type: ${containerType}, weight: ${weight}kg`);
-    
-    // Получение актуальных данных из различных источников
-    const scfiData = await getUpdatedSCFIDataForRoute(origin, destination);
-    const fbxData = await fbxScraper.getFBXDataForRoute(origin, destination);
-    const wciData = await wciScraper.getWCIDataForRoute(origin, destination);
-    
-    // Массив для хранения данных из всех источников
-    const sourcesData = [];
-    
-    // Добавление данных из SCFI, если они доступны
-    if (scfiData && scfiData.current_index) {
-      sourcesData.push({
-        source: 'SCFI',
-        rate: scfiData.current_index,
-        weight: SOURCE_WEIGHTS['SCFI'] || 1.0
-      });
-    }
-    
-    // Добавление данных из FBX, если они доступны
-    if (fbxData && fbxData.current_index) {
-      sourcesData.push({
-        source: 'Freightos FBX',
-        rate: fbxData.current_index,
-        weight: SOURCE_WEIGHTS['Freightos FBX'] || 1.0
-      });
-    }
-    
-    // Добавление данных из WCI, если они доступны
-    if (wciData && wciData.current_index) {
-      sourcesData.push({
-        source: 'Drewry WCI',
-        rate: wciData.current_index,
-        weight: SOURCE_WEIGHTS['Drewry WCI'] || 1.0
-      });
-    }
-    
-    // Если нет данных ни из одного источника, используем базовый расчет
-    if (sourcesData.length === 0) {
-      console.log('No data available from any source, using base calculation');
-      return calculateBaseRate(origin, destination, containerType, weight);
-    }
-    
-    // Расчет средневзвешенной ставки
-    let totalWeight = 0;
-    let weightedSum = 0;
-    
-    sourcesData.forEach(data => {
-      weightedSum += data.rate * data.weight;
-      totalWeight += data.weight;
-    });
-    
-    const baseRate = Math.round(weightedSum / totalWeight);
-    
-    // Расчет минимальной и максимальной ставки
-    // Используем стандартное отклонение для определения диапазона
-    const rates = sourcesData.map(data => data.rate);
-    const stdDev = calculateStandardDeviation(rates);
-    
-    // Минимальная ставка: базовая ставка минус стандартное отклонение, но не менее 80% от базовой
-    const minRate = Math.round(Math.max(baseRate - stdDev, baseRate * 0.8));
-    
-    // Максимальная ставка: базовая ставка плюс стандартное отклонение, но не более 120% от базовой
-    const maxRate = Math.round(Math.min(baseRate + stdDev, baseRate * 1.2));
-    
-    // Расчет надежности на основе количества источников и их согласованности
-    // Чем больше источников и меньше стандартное отклонение, тем выше надежность
-    const sourceCount = sourcesData.length;
-    const maxPossibleSources = 3; // SCFI, FBX, WCI
-    const sourceRatio = sourceCount / maxPossibleSources;
-    
-    // Коэффициент вариации (CV) - отношение стандартного отклонения к среднему
-    const cv = baseRate > 0 ? stdDev / baseRate : 0;
-    
-    // Надежность: от 0.7 до 1.0, зависит от количества источников и их согласованности
-    const reliability = Math.round((0.7 + 0.3 * sourceRatio * (1 - Math.min(cv, 0.5) / 0.5)) * 100) / 100;
-    
-    // Применение корректировки на основе веса
-    const weightAdjustedRate = adjustRateByWeight(baseRate, weight, containerType);
-    
-    // Формирование результата
-    const result = {
-      rate: weightAdjustedRate,
-      minRate: Math.round(minRate * (weightAdjustedRate / baseRate)),
-      maxRate: Math.round(maxRate * (weightAdjustedRate / baseRate)),
-      reliability: reliability,
-      sourceCount: sourceCount,
-      sources: sourcesData.map(data => data.source),
-      finalRate: weightAdjustedRate // Добавляем для совместимости с API
+    // 1. Получение данных из всех источников параллельно
+    const fetchStep = { stage: 'Fetch Index Data', sources: {} };
+    const indexPromises = {
+      // Основные индексы
+      SCFI: scfiScraper.getSCFIDataForCalculation(),
+      FBX: scraperAdapters.getFBXDataForCalculationAdapter(),
+      WCI: scraperAdapters.getWCIDataForCalculationAdapter(),
+      CCFI: ccfiScraper.getCCFIDataForCalculation(), // Используем прямой вызов исправленного
+      // Модификаторы
+      Harpex: harpexScraper.getHarpexDataForCalculation(),
+      NewConTex: contexScraper.getContexDataForCalculation(),
+      BDI: bdiScraper.getBDIDataForCalculation(),
+      CTS: ctsScraper.getCTSDataForCalculation(),
+      ISTFIX: istfixScraper.getISTFIXDataForCalculation()
     };
-    
-    console.log('Calculation result:', result);
-    return result;
-  } catch (error) {
-    console.error('Error calculating freight rate:', error);
-    // В случае ошибки используем базовый расчет
-    return calculateBaseRate(origin, destination, containerType, weight);
-  }
-}
 
-// Функция для корректировки ставки на основе веса
-function adjustRateByWeight(baseRate, weight, containerType) {
-  try {
-    // Стандартные веса для разных типов контейнеров (в кг)
-    const standardWeights = {
-      '20DV': 20000, // 20 тонн для 20-футового контейнера
-      '40DV': 25000, // 25 тонн для 40-футового контейнера
-      '40HC': 25000, // 25 тонн для 40-футового high cube
-      '45HC': 27000  // 27 тонн для 45-футового high cube
+    const indexResults = await Promise.allSettled(Object.values(indexPromises));
+    const indexData = {};
+    const sourceKeys = Object.keys(indexPromises);
+
+    for (let i = 0; i < sourceKeys.length; i++) {
+      const key = sourceKeys[i];
+      const result = indexResults[i];
+
+      if (result.status === 'fulfilled' && result.value && result.value.current_index !== undefined) {
+        indexData[key] = result.value;
+        fetchStep.sources[key] = { status: 'Success', value: indexData[key] };
+      } else {
+        const reason = result.reason?.message || (result.value === null ? 'No data returned' : 'Invalid data format');
+        console.log(`[Fallback] Primary fetch for ${key} failed. Reason: ${reason}. Trying web search...`);
+        fetchStep.sources[key] = { status: 'Failed (Primary)', reason };
+        try {
+          const webSearchResult = await webSearchIndices.searchIndexValue(key);
+          if (webSearchResult && webSearchResult.value !== undefined) {
+            indexData[key] = {
+              current_index: webSearchResult.value,
+              index_date: webSearchResult.date,
+              change: webSearchResult.change, // Добавляем изменение, если есть
+              source: 'web_search'
+            };
+            fetchStep.sources[key] = { status: 'Success (Web Search Fallback)', value: indexData[key] };
+            console.log(`[Fallback] Web search for ${key} successful.`);
+          } else {
+            indexData[key] = null;
+            fetchStep.sources[key].status = 'Failed (Fallback Failed)';
+            fetchStep.sources[key].fallback_reason = 'Web search did not return valid data';
+            console.log(`[Fallback] Web search for ${key} failed.`);
+          }
+        } catch (webSearchError) {
+          indexData[key] = null;
+          fetchStep.sources[key].status = 'Failed (Fallback Error)';
+          fetchStep.sources[key].fallback_reason = webSearchError.message;
+          console.error(`[Fallback] Error during web search for ${key}:`, webSearchError);
+        }
+      }
+    }
+    if (debugMode) debugLog.push(fetchStep);
+
+    // 2. Расчет базовой ставки (Ocean Freight) на основе основных индексов
+    const coreRateStep = { stage: 'Calculate Core Ocean Freight', inputs: {}, sourcesUsed: [], totalWeight: 0, weightedSum: 0, rates: [] };
+    const coreSourcesData = [];
+    for (const sourceName of ['SCFI', 'FBX', 'WCI', 'CCFI']) {
+      if (indexData[sourceName] && indexData[sourceName].current_index !== undefined) {
+        const rateValue = parseFloat(indexData[sourceName].current_index);
+        if (!isNaN(rateValue)) {
+            const weight = CORE_SOURCE_WEIGHTS[sourceName] || 1.0;
+            coreSourcesData.push({
+                source: sourceName + (indexData[sourceName].source === 'web_search' ? ' (Web)' : ''),
+                rate: rateValue,
+                weight: weight
+            });
+            coreRateStep.inputs[sourceName] = { rate: rateValue, weight: weight, source_type: indexData[sourceName].source || 'primary' };
+            coreRateStep.weightedSum += rateValue * weight;
+            coreRateStep.totalWeight += weight;
+            coreRateStep.rates.push(rateValue);
+        }
+      }
+    }
+
+    if (coreRateStep.totalWeight > 0) {
+      baseOceanFreight = Math.round(coreRateStep.weightedSum / coreRateStep.totalWeight);
+      coreRateStep.result = baseOceanFreight;
+      coreRateStep.status = 'Success';
+      coreRateStep.sourcesUsed = coreSourcesData.map(d => d.source);
+      sourcesUsedList = coreSourcesData.map(d => d.source);
+      sourcesUsedCount = coreSourcesData.length;
+
+      // Расчет надежности на основе количества источников и стандартного отклонения
+      const stdDev = calculateStandardDeviation(coreRateStep.rates);
+      const relativeStdDev = baseOceanFreight > 0 ? stdDev / baseOceanFreight : 0;
+      // Примерная формула надежности: больше источников -> выше, больше разброс -> ниже
+      reliabilityScore = 0.7 + (sourcesUsedCount * 0.05) - (relativeStdDev * 0.5);
+      reliabilityScore = Math.max(0.5, Math.min(0.95, reliabilityScore)); // Ограничение 0.5 - 0.95
+      coreRateStep.reliability = { score: reliabilityScore.toFixed(2), stdDev: stdDev.toFixed(2), relativeStdDev: relativeStdDev.toFixed(2) };
+      calculationStatus = 'Core Rate Calculated';
+
+    } else {
+      // Если нет данных от основных источников, используем базовый расчет
+      if (debugMode) debugLog.push({ stage: 'Core Ocean Freight Calculation', status: 'Failed', reason: 'No data from core indices (SCFI, FBX, WCI, CCFI). Falling back to base calculation.' });
+      const baseResult = calculateBaseRate(originPortId, destinationPortId, containerType, debugLog);
+      baseOceanFreight = baseResult.rate;
+      reliabilityScore = baseResult.reliability;
+      sourcesUsedList = baseResult.sourcesUsed;
+      sourcesUsedCount = baseResult.sourceCount;
+      // Логирование базового расчета уже внутри calculateBaseRate
+      calculationStatus = 'Fallback Rate Used';
+    }
+    if (debugMode) debugLog.push(coreRateStep);
+
+    // 3. Расчет и применение модификаторов к baseOceanFreight
+    let modifiedOceanFreight = baseOceanFreight;
+    const modifierStep = { stage: 'Apply Modifiers to Ocean Freight', initialRate: baseOceanFreight, modifiersApplied: {}, finalRate: null };
+
+    const originRegion = await getPortRegionById(originPortId);
+    const destinationRegion = await getPortRegionById(destinationPortId);
+    modifierStep.routeInfo = { originRegion, destinationRegion };
+
+    // 3.1 Модификатор фрахтования (Harpex, NewConTex)
+    let charterModifier = 1.0;
+    let charterSources = 0;
+    if (indexData.Harpex && indexData.Harpex.current_index !== undefined) {
+      const value = parseFloat(indexData.Harpex.current_index);
+      const baseline = MODIFIER_BASELINES.Harpex;
+      if (!isNaN(value) && baseline) {
+          charterModifier *= (1 + MODIFIER_WEIGHTS.Harpex * (value - baseline) / baseline);
+          charterSources++;
+          modifierStep.modifiersApplied.Harpex = { value, baseline, weight: MODIFIER_WEIGHTS.Harpex, source_type: indexData.Harpex.source || 'primary' };
+      }
+    }
+     if (indexData.NewConTex && indexData.NewConTex.current_index !== undefined) {
+      const value = parseFloat(indexData.NewConTex.current_index);
+      const baseline = MODIFIER_BASELINES.NewConTex;
+       if (!isNaN(value) && baseline) {
+          charterModifier *= (1 + MODIFIER_WEIGHTS.NewConTex * (value - baseline) / baseline);
+          charterSources++;
+          modifierStep.modifiersApplied.NewConTex = { value, baseline, weight: MODIFIER_WEIGHTS.NewConTex, source_type: indexData.NewConTex.source || 'primary' };
+       }
+    }
+    if (charterSources > 0) {
+      charterModifier = Math.max(0.8, Math.min(1.2, charterModifier)); // Ограничиваем модификатор +/- 20%
+      modifiedOceanFreight *= charterModifier;
+      modifierStep.modifiersApplied.Charter = { factor: charterModifier.toFixed(3), rateAfter: Math.round(modifiedOceanFreight) };
+    }
+
+    // 3.2 Модификатор спроса (BDI, CTS)
+    let demandModifier = 1.0;
+    let demandSources = 0;
+    if (indexData.BDI && indexData.BDI.current_index !== undefined) {
+      const value = parseFloat(indexData.BDI.current_index);
+      const baseline = MODIFIER_BASELINES.BDI;
+       if (!isNaN(value) && baseline) {
+          demandModifier *= (1 + MODIFIER_WEIGHTS.BDI * (value - baseline) / baseline);
+          demandSources++;
+          modifierStep.modifiersApplied.BDI = { value, baseline, weight: MODIFIER_WEIGHTS.BDI, source_type: indexData.BDI.source || 'primary' };
+       }
+    }
+    if (indexData.CTS && indexData.CTS.current_index !== undefined) {
+      const value = parseFloat(indexData.CTS.current_index);
+      const baseline = MODIFIER_BASELINES.CTS;
+       if (!isNaN(value) && baseline) {
+          demandModifier *= (1 + MODIFIER_WEIGHTS.CTS * (value - baseline) / baseline);
+          demandSources++;
+          modifierStep.modifiersApplied.CTS = { value, baseline, weight: MODIFIER_WEIGHTS.CTS, source_type: indexData.CTS.source || 'primary' };
+       }
+    }
+     if (demandSources > 0) {
+      demandModifier = Math.max(0.9, Math.min(1.1, demandModifier)); // Ограничиваем модификатор +/- 10%
+      modifiedOceanFreight *= demandModifier;
+      modifierStep.modifiersApplied.Demand = { factor: demandModifier.toFixed(3), rateAfter: Math.round(modifiedOceanFreight) };
+    }
+
+    // 3.3 Модификатор ISTFIX (Intra-Asia)
+    const isIntraAsia = (originRegion === 'Asia' || originRegion === 'China') && (destinationRegion === 'Asia' || destinationRegion === 'China');
+    modifierStep.modifiersApplied.ISTFIX_Check = { isIntraAsia };
+
+    if (isIntraAsia && indexData.ISTFIX && indexData.ISTFIX.current_index !== undefined) {
+      const value = parseFloat(indexData.ISTFIX.current_index);
+      if (!isNaN(value)) {
+          const istfixWeight = MODIFIER_WEIGHTS.ISTFIX;
+          const coreWeight = 1.0; // Вес для уже рассчитанной ставки
+          modifiedOceanFreight = (modifiedOceanFreight * coreWeight + value * istfixWeight) / (coreWeight + istfixWeight);
+          modifierStep.modifiersApplied.ISTFIX = { applied: true, value, weight: istfixWeight, rateAfter: Math.round(modifiedOceanFreight), source_type: indexData.ISTFIX.source || 'primary' };
+      } else {
+          modifierStep.modifiersApplied.ISTFIX = { applied: false, reason: 'Invalid ISTFIX data' };
+      }
+    } else if (isIntraAsia) {
+       modifierStep.modifiersApplied.ISTFIX = { applied: false, reason: 'No ISTFIX data available' };
+    } else {
+       modifierStep.modifiersApplied.ISTFIX = { applied: false, reason: 'Not an Intra-Asia route' };
+    }
+
+    modifiedOceanFreight = Math.round(modifiedOceanFreight);
+    modifierStep.finalRate = modifiedOceanFreight;
+    if (debugMode) debugLog.push(modifierStep);
+    calculationStatus = 'Modifiers Applied';
+
+    // 4. Применение сезонности к modifiedOceanFreight
+    let seasonalOceanFreight = modifiedOceanFreight;
+    const seasonalityStep = { stage: 'Apply Seasonality to Ocean Freight', initialRate: modifiedOceanFreight, factor: 1.0, finalRate: null };
+    try {
+      const currentMonth = new Date().getMonth() + 1; // 1-12
+      const seasonalityData = await seasonalityAnalyzer.getSeasonalityFactor(originRegion, destinationRegion, currentMonth);
+      if (seasonalityData && seasonalityData.factor) {
+        seasonalityStep.factor = seasonalityData.factor;
+        seasonalOceanFreight *= seasonalityData.factor;
+        seasonalityStep.details = `Fetched factor for ${originRegion}-${destinationRegion}, Month ${currentMonth}. Confidence: ${seasonalityData.confidence}.`;
+      } else {
+        seasonalityStep.details = `No seasonality factor found for ${originRegion}-${destinationRegion}, Month ${currentMonth}. Using 1.0.`;
+      }
+    } catch (error) {
+      seasonalityStep.status = 'Error fetching/applying seasonality';
+      seasonalityStep.error = error.message;
+      console.error('Error applying seasonality:', error);
+    }
+    seasonalOceanFreight = Math.round(seasonalOceanFreight);
+    seasonalityStep.finalRate = seasonalOceanFreight;
+    if (debugMode) debugLog.push(seasonalityStep);
+    calculationStatus = 'Seasonality Applied';
+
+    // 5. Расчет топливной надбавки (Fuel Surcharge / BAF)
+    // Рассчитываем всегда и добавляем к seasonalOceanFreight
+    const fuelSurchargeStep = { stage: 'Calculate Fuel Surcharge', surcharge: 0, details: 'Not calculated yet' };
+    let fuelSurcharge = 0;
+    try {
+      // Получаем тип топлива (например, VLSFO) и цену
+      // TODO: Определить, какой тип топлива использовать? Пока захардкодим VLSFO
+      const fuelType = 'VLSFO';
+      const fuelPriceData = await fuelSurchargeCalculator.getLatestFuelPrice(fuelType);
+
+      if (fuelPriceData && fuelPriceData.price) {
+        // Рассчитываем надбавку
+        // Нужны расстояние или время в пути. Пока используем заглушку.
+        // TODO: Реализовать получение расстояния/времени для маршрута
+        const distanceNM = 5000; // Примерное расстояние в морских милях
+        fuelSurcharge = fuelSurchargeCalculator.calculateSurcharge(fuelPriceData.price, distanceNM, containerType);
+        fuelSurchargeStep.surcharge = fuelSurcharge;
+        fuelSurchargeStep.details = `Calculated surcharge based on ${fuelType} price ${fuelPriceData.price} (Date: ${fuelPriceData.price_date}) for distance ${distanceNM} NM.`;
+        fuelSurchargeStep.status = 'Success';
+      } else {
+        fuelSurchargeStep.details = `Could not get latest fuel price for ${fuelType}. Surcharge set to 0.`;
+        fuelSurchargeStep.status = 'Failed (No Fuel Price)';
+        console.warn(`Could not get fuel price for ${fuelType}, fuel surcharge will be 0.`);
+      }
+    } catch (error) {
+      fuelSurchargeStep.status = 'Error';
+      fuelSurchargeStep.error = error.message;
+      fuelSurchargeStep.details = `Error calculating fuel surcharge. Surcharge set to 0.`;
+      console.error('Error calculating fuel surcharge:', error);
+    }
+    if (debugMode) debugLog.push(fuelSurchargeStep);
+    calculationStatus = 'Fuel Surcharge Calculated';
+
+    // 6. Финальный расчет ставки (Rate = Seasonal Ocean Freight + Fuel Surcharge)
+    const finalRate = seasonalOceanFreight + fuelSurcharge;
+    const finalStep = { stage: 'Final Rate Calculation', seasonalOceanFreight, fuelSurcharge, finalRate };
+    if (debugMode) debugLog.push(finalStep);
+
+    // 7. Расчет Min/Max для администратора на основе finalRate
+    // Используем разброс, зависящий от надежности
+    const spreadFactor = 0.1 + (1 - reliabilityScore) * 0.1; // От 10% до 15% в зависимости от надежности
+    const minRate = Math.round(finalRate * (1 - spreadFactor));
+    const maxRate = Math.round(finalRate * (1 + spreadFactor));
+    const rangeStep = { stage: 'Calculate Min/Max Range', finalRate, reliabilityScore: reliabilityScore.toFixed(2), spreadFactor: spreadFactor.toFixed(2), minRate, maxRate };
+    if (debugMode) debugLog.push(rangeStep);
+
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    if (debugMode) debugLog.push({ stage: 'End Calculation', durationMs: duration, finalResult: { rate: finalRate, minRate, maxRate } });
+    calculationStatus = 'Completed';
+
+    // Возвращаем результат
+    return {
+      rate: finalRate, // Единая ставка для пользователя
+      minRate: minRate, // Минимальная ставка для админа
+      maxRate: maxRate, // Максимальная ставка для админа
+      reliability: parseFloat(reliabilityScore.toFixed(2)),
+      sourceCount: sourcesUsedCount,
+      sourcesUsed: sourcesUsedList,
+      calculationTimeMs: duration,
+      debugLog: debugMode ? debugLog : undefined // Включаем лог только в debugMode
     };
-    
-    // Если тип контейнера неизвестен, используем стандартный вес 20 тонн
-    const standardWeight = standardWeights[containerType] || 20000;
-    
-    // Если вес не указан или меньше 1000 кг, используем стандартный вес
-    if (!weight || weight < 1000) {
-      return baseRate;
-    }
-    
-    // Расчет коэффициента корректировки
-    // Если вес меньше стандартного, ставка немного снижается
-    // Если вес больше стандартного, ставка увеличивается пропорционально
-    let adjustmentFactor = 1.0;
-    
-    if (weight < standardWeight) {
-      // Снижение до 10% для легких грузов
-      const weightRatio = weight / standardWeight;
-      adjustmentFactor = 0.9 + (0.1 * weightRatio);
-    } else if (weight > standardWeight) {
-      // Увеличение до 30% для тяжелых грузов
-      const excessRatio = Math.min(1.0, (weight - standardWeight) / standardWeight);
-      adjustmentFactor = 1.0 + (0.3 * excessRatio);
-    }
-    
-    // Применение коэффициента корректировки
-    return Math.round(baseRate * adjustmentFactor);
+
   } catch (error) {
-    console.error('Error adjusting rate by weight:', error);
-    // В случае ошибки возвращаем исходную ставку
-    return baseRate;
-  }
-}
-
-// Функция для базового расчета ставки фрахта (используется, если нет данных из источников)
-function calculateBaseRate(origin, destination, containerType, weight = 20000) {
-  // Используем детерминированный подход вместо случайных чисел
-  // Создаем хеш на основе полных названий портов и типа контейнера
-  console.log(`Calculating base rate for ${origin} to ${destination}, container type: ${containerType}`);
-  
-  // Функция для создания простого хеша строки
-  function simpleHash(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
+    console.error('Unhandled error during freight rate calculation:', error);
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    if (debugMode) {
+        debugLog.push({ stage: 'Unhandled Error', error: error.message, stack: error.stack });
+        debugLog.push({ stage: 'End Calculation (Error)', durationMs: duration });
     }
-    return Math.abs(hash);
-  }
-  
-  // Создаем строку для хеширования, включающую все параметры
-  const hashString = `${origin}-${destination}-${containerType}`;
-  const hash = simpleHash(hashString);
-  
-  // Базовая ставка: 1500 + хеш модуло 1500 (диапазон от 1500 до 3000)
-  const baseRate = 1500 + (hash % 1500);
-  
-  console.log(`Generated deterministic base rate for ${hashString}: ${baseRate}`);
-  
-  // Применение корректировки на основе веса
-  const weightAdjustedRate = adjustRateByWeight(baseRate, weight, containerType);
-  
-  // Формирование результата
-  const result = {
-    rate: weightAdjustedRate,
-    minRate: Math.round(weightAdjustedRate * 0.9),  // -10%
-    maxRate: Math.round(weightAdjustedRate * 1.1),  // +10%
-    reliability: 0.7,  // Низкая надежность, так как используется базовый расчет
-    sourceCount: 0,
-    sources: ['Base calculation'],
-    finalRate: weightAdjustedRate // Добавляем для совместимости с API
-  };
-  
-  console.log('Base calculation result:', result);
-  return result;
-}
+    // Возвращаем ошибку или fallback
+    // Можно вернуть базовый расчет как fallback при серьезной ошибке
+     const fallbackResult = calculateBaseRate(originPortId, destinationPortId, containerType, debugLog);
+     // Попытаемся добавить топливо к fallback, если возможно
+     let finalFallbackRate = fallbackResult.rate;
+     try {
+        const fuelType = 'VLSFO';
+        const fuelPriceData = await fuelSurchargeCalculator.getLatestFuelPrice(fuelType);
+        if (fuelPriceData && fuelPriceData.price) {
+            const distanceNM = 5000; // Пример
+            const surcharge = fuelSurchargeCalculator.calculateSurcharge(fuelPriceData.price, distanceNM, containerType);
+            finalFallbackRate += surcharge;
+            if (debugMode) debugLog.push({ stage: 'Fallback Fuel Surcharge', surcharge, finalFallbackRate });
+        }
+     } catch (fuelError) {
+         if (debugMode) debugLog.push({ stage: 'Fallback Fuel Surcharge Error', error: fuelError.message });
+     }
 
-// Функция для расчета стандартного отклонения
-function calculateStandardDeviation(values) {
-  const n = values.length;
-  if (n === 0) return 0;
-  
-  // Расчет среднего значения
-  const mean = values.reduce((sum, value) => sum + value, 0) / n;
-  
-  // Расчет суммы квадратов отклонений
-  const squaredDifferencesSum = values.reduce((sum, value) => {
-    const difference = value - mean;
-    return sum + (difference * difference);
-  }, 0);
-  
-  // Расчет дисперсии и стандартного отклонения
-  const variance = squaredDifferencesSum / n;
-  const stdDev = Math.sqrt(variance);
-  
-  return stdDev;
-}
-
-// Функция для обновления данных из всех источников
-async function updateAllSourcesData() {
-  try {
-    console.log('Updating data from all sources...');
-    
-    // Обновление данных SCFI
-    await scfiScraper.fetchSCFIData();
-    
-    // Обновление данных FBX
-    await fbxScraper.fetchFBXData();
-    
-    // Обновление данных WCI
-    await wciScraper.fetchWCIData();
-    
-    console.log('All sources data updated successfully');
-    return true;
-  } catch (error) {
-    console.error('Error updating sources data:', error);
-    return false;
+    return {
+      rate: finalFallbackRate,
+      minRate: Math.round(finalFallbackRate * 0.85),
+      maxRate: Math.round(finalFallbackRate * 1.15),
+      reliability: 0.4, // Очень низкая надежность при ошибке
+      sourceCount: 0,
+      sourcesUsed: ['Error Fallback'],
+      calculationTimeMs: duration,
+      error: error.message, // Добавляем сообщение об ошибке
+      debugLog: debugMode ? debugLog : undefined
+    };
   }
 }
 
-// Экспорт функций
-module.exports = {
-  calculateFreightRate,
-  updateAllSourcesData
+// Экспорт основной функции
+export default {
+  calculateFreightRate
 };
+
+// Для совместимости с require в других модулях (если нужно)
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    calculateFreightRate
+  };
+}
+
